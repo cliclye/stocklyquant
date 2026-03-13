@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { BookmarkPlus, BookmarkCheck, TrendingUp, Activity, DollarSign, BarChart2, AlertCircle, Shield, Calculator } from "lucide-react";
 import type { QuantAnalysis } from "@/lib/types";
-import { PriceChart, PredictionChart } from "./Charts";
+import { PriceChart, PredictionChart, QuantPredictionChart } from "./Charts";
 import AIAnalysis from "./AIAnalysis";
 import { useApp } from "@/lib/context";
 import { marketCapFormatted } from "@/lib/quantCalculator";
@@ -128,12 +128,12 @@ export default function StockDetail({ analysis }: Props) {
         <PriceChart data={analysis.priceHistory} />
       </div>
 
-      {/* Prediction Chart */}
+      {/* GBM Prediction Chart (multi-scenario) */}
       {analysis.pricePrediction && (
         <div className="bg-gray-800/60 rounded-xl p-4 mb-5">
           <div className="flex items-center gap-2 mb-3">
             <TrendingUp size={15} className="text-blue-400" />
-            <p className="text-xs text-gray-400 uppercase tracking-wide">30-Day Prediction</p>
+            <p className="text-xs text-gray-400 uppercase tracking-wide">30-Day Scenario Prediction</p>
             {analysis.claudeAnalysis && (
               <span className="ml-auto text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 rounded-md px-2 py-0.5">
                 {analysis.claudeAnalysis.selectedFormula} · {analysis.claudeAnalysis.riskMetric}
@@ -141,6 +141,20 @@ export default function StockDetail({ analysis }: Props) {
             )}
           </div>
           <PredictionChart prediction={analysis.pricePrediction} />
+        </div>
+      )}
+
+      {/* Quant Composite Prediction Chart (single deterministic line) */}
+      {analysis.quantPricePath && (
+        <div className="bg-gray-800/60 rounded-xl p-4 mb-5">
+          <div className="flex items-center gap-2 mb-3">
+            <BarChart2 size={15} className="text-cyan-400" />
+            <p className="text-xs text-gray-400 uppercase tracking-wide">30-Day Quant Projection</p>
+            <span className="ml-auto text-xs bg-cyan-900/40 text-cyan-400 border border-cyan-700/40 rounded-md px-2 py-0.5">
+              Pure Quant
+            </span>
+          </div>
+          <QuantPredictionChart path={analysis.quantPricePath} />
         </div>
       )}
 

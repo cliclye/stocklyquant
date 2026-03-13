@@ -21,6 +21,7 @@ import {
   computeRiskMetrics,
   computeKelly,
   computePricePrediction,
+  computeQuantPricePath,
   quantScoreLabel,
   computeReturnsFromPrices,
   ANNUAL_RISK_FREE_RATE,
@@ -356,12 +357,16 @@ export async function POST(req: NextRequest) {
         const from730 = dateOffset(730);
         const from2y = dateOffset(750);
 
-        const [stockBars, spyBars, iwmBars, iveBars, ivwBars] = await Promise.all([
+        const [stockBars, spyBars, iwmBars, iveBars, ivwBars, usoBars, tltBars, vxxBars, gldBars] = await Promise.all([
           fetchPolygonBars(ticker, from730, to, polygonKey),
           fetchPolygonBars("SPY", from2y, to, polygonKey),
           fetchPolygonBars("IWM", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
           fetchPolygonBars("IVE", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
           fetchPolygonBars("IVW", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
+          fetchPolygonBars("USO", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
+          fetchPolygonBars("TLT", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
+          fetchPolygonBars("VXX", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
+          fetchPolygonBars("GLD", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
         ]);
 
         const [profileArr, metricsArr, ratiosArr, incomeArr, balanceArr] = await Promise.all([
@@ -501,6 +506,23 @@ export async function POST(req: NextRequest) {
           riskMetrics
         ) ?? undefined;
 
+        const macroReturns = {
+          oil: usoBars ? computeReturnsFromPrices(usoBars) : null,
+          rates: tltBars ? computeReturnsFromPrices(tltBars) : null,
+          vix: vxxBars ? computeReturnsFromPrices(vxxBars) : null,
+          gold: gldBars ? computeReturnsFromPrices(gldBars) : null,
+        };
+
+        // Quant price path — single composite line, pure quant signals
+        const quantPricePath = computeQuantPricePath(
+          stockBars,
+          famaFrench,
+          momentum,
+          quantScore,
+          riskMetrics,
+          macroReturns
+        ) ?? undefined;
+
         // Recalculate score with Claude's recommended weights (engine does all calculations)
         if (claudeAnalysis) {
           const aiAdjustedScore = computeQuantScore(
@@ -526,6 +548,7 @@ export async function POST(req: NextRequest) {
           kelly,
           priceHistory: stockBars,
           pricePrediction,
+          quantPricePath,
           claudeAnalysis,
           claudeError,
           quantScore,

@@ -10,6 +10,8 @@ import type {
   PricePrediction,
   PredictionPoint,
   PricePoint,
+  QuantPathPoint,
+  QuantPricePath,
   RiskLevel,
   RiskMetrics,
   ValueMetrics,
@@ -680,3 +682,168 @@ export function computePricePrediction(
       : "GBM · FF5 drift · Historical vol",
   };
 }
+
+// ─── Quant Price Path (single composite line, pure calculation) ───────────────
+
+/**
+ * Generates a single deterministic price path driven by a comprehensive blend
+ * of quantitative signals, macro indicators, and risk-regime adjustments.
+ *
+ * Composite daily drift is a weighted blend:
+ *
+ *   Signal 1 — FF5 Factor Return (30%):
+ *     Derived from Fama-French 5-factor OLS regression.
+ *
+ *   Signal 2 — Momentum Persistence (25%):
+ *     Based on 3-month and 12-month momentum persistence.
+ *
+ *   Signal 3 — Macro Interdependency (20%):
+ *     Calculates correlation between stock and macro assets (Oil, Rates, VIX, Gold).
+ *     Drift = sum(Correlation * MacroTrend).
+ *
+ *   Signal 4 — Risk-Regime Adjustment (15%):
+ *     Adjusts drift based on GARCH(1,1) vs Historical volatility divergence.
+ *
+ *   Signal 5 — Quant Score Alpha (10%):
+ *     Composite fundamental/quality alpha signal.
+ */
+export function computeQuantPricePath(
+  priceHistory: PricePoint[],
+  famaFrench: FamaFrenchResult | null,
+  momentum: MomentumResult | null,
+  quantScore: number,
+  riskMetrics: RiskMetrics | null,
+  macroData?: {
+    oil: DailyReturn[] | null;
+    rates: DailyReturn[] | null;
+    vix: DailyReturn[] | null;
+    gold: DailyReturn[] | null;
+  },
+  forecastDays = 30
+): QuantPricePath | null {
+  if (priceHistory.length < 10) return null;
+
+  const sorted = [...priceHistory].sort(
+    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+  const stockReturns = computeReturnsFromPrices(sorted);
+  const currentPrice = sorted[sorted.length - 1].price;
+  const lastDate = new Date(sorted[sorted.length - 1].date);
+
+  // ── Signal 1: FF5 (30% weight) ──────────────────────────────────────────
+  const ff5Annual = famaFrench
+    ? famaFrench.expectedExcessReturn + ANNUAL_RISK_FREE_RATE
+    : ANNUAL_RISK_FREE_RATE + MARKET_PREMIUM * 0.8;
+  const ff5Daily = ff5Annual / 252;
+
+  // ── Signal 2: Momentum (25% weight) ─────────────────────────────────────
+  const rawMom3M = momentum?.momentum3M ?? 1.0;
+  const rawMom12M = momentum?.momentum12M ?? 1.0;
+  // Blend 3M and 12M momentum
+  const momAnnual = Math.min(
+    Math.max(0.6 * (Math.pow(rawMom3M, 4) - 1) + 0.4 * (rawMom12M - 1), -0.50),
+    0.80
+  );
+  const momDaily = momAnnual / 252;
+
+  // ── Signal 3: Macro (20% weight) ────────────────────────────────────────
+  let macroAnnual = 0;
+  if (macroData) {
+    const assets = [
+      { name: "Oil", returns: macroData.oil },
+      { name: "Rates", returns: macroData.rates },
+      { name: "VIX", returns: macroData.vix },
+      { name: "Gold", returns: macroData.gold },
+    ];
+
+    for (const asset of assets) {
+      if (!asset.returns || asset.returns.length < 60) continue;
+      const { stock, market: assetR } = alignReturns(stockReturns, asset.returns);
+      if (stock.length < 30) continue;
+
+      // Calculate correlation
+      const meanS = stock.reduce((a, b) => a + b, 0) / stock.length;
+      const meanA = assetR.reduce((a, b) => a + b, 0) / assetR.length;
+      let num = 0, denS = 0, denA = 0;
+      for (let i = 0; i < stock.length; i++) {
+        const ds = stock[i] - meanS;
+        const da = assetR[i] - meanA;
+        num += ds * da;
+        denS += ds * ds;
+        denA += da * da;
+      }
+      const corr = denS > 0 && denA > 0 ? num / Math.sqrt(denS * denA) : 0;
+
+      // Recent trend (last 21 days)
+      const trend = asset.returns.slice(-21).reduce((a, b) => a + b.returnValue, 0) * (252 / 21);
+      macroAnnual += corr * trend * 0.5; // Scaled impact
+    }
+  }
+  macroAnnual = Math.min(Math.max(macroAnnual, -0.30), 0.30);
+  const macroDaily = macroAnnual / 252;
+
+  // ── Signal 4: Risk/GARCH (15% weight) ───────────────────────────────────
+  // If GARCH vol > Historical vol, we penalise drift (uncertainty tax)
+  const histVol = computeVolatility(priceHistory)?.annualizedVolatility ?? 0.25;
+  const garchVol = riskMetrics?.garchVol ?? histVol;
+  const volDiff = garchVol - histVol;
+  const riskAdjAnnual = -Math.max(volDiff, 0) * 0.5; // High vol regime = lower drift
+  const riskDaily = riskAdjAnnual / 252;
+
+  // ── Signal 5: Score Alpha (10% weight) ──────────────────────────────────
+  const scoreNorm = (quantScore - 50) / 50;
+  const scoreAlphaAnnual = scoreNorm * MARKET_PREMIUM * 0.50;
+  const scoreDaily = scoreAlphaAnnual / 252;
+
+  // ── Composite weighted daily return ─────────────────────────────────────
+  const W = { FF5: 0.30, MOM: 0.25, MACRO: 0.20, RISK: 0.15, SCR: 0.10 };
+  const compositeDaily =
+    W.FF5 * ff5Daily +
+    W.MOM * momDaily +
+    W.MACRO * macroDaily +
+    W.RISK * riskDaily +
+    W.SCR * scoreDaily;
+  const compositeAnnual = compositeDaily * 252;
+
+  // ── Forecast ───────────────────────────────────────────────────────────
+  const histPoints: QuantPathPoint[] = sorted.slice(-30).map((p) => ({
+    date: p.date,
+    actual: parseFloat(p.price.toFixed(2)),
+  }));
+
+  const forecastPoints: QuantPathPoint[] = [];
+  for (let t = 1; t <= forecastDays; t++) {
+    const fd = new Date(lastDate);
+    fd.setDate(fd.getDate() + Math.round(t * 1.4));
+    forecastPoints.push({
+      date: fd.toISOString().slice(0, 10),
+      quant: parseFloat(
+        (currentPrice * Math.pow(1 + compositeDaily, t)).toFixed(2)
+      ),
+    });
+  }
+
+  const expected30d = Math.pow(1 + compositeDaily, forecastDays) - 1;
+
+  return {
+    points: [...histPoints, ...forecastPoints],
+    currentPrice,
+    expectedReturn30d: expected30d,
+    annualDrift: compositeAnnual,
+    methodology: "Multi-Factor Quant Blend (FF5, Momentum, Macro, Risk, Score)",
+    signals: {
+      ff5Weight: W.FF5,
+      momentumWeight: W.MOM,
+      scoreWeight: W.SCR,
+      macroWeight: W.MACRO,
+      riskWeight: W.RISK,
+      ff5AnnualReturn: ff5Annual,
+      momentum3MAnnualised: momAnnual,
+      scoreAlphaAnnual,
+      macroAnnualReturn: macroAnnual,
+      riskAdjustedAnnualReturn: riskAdjAnnual,
+      compositeDailyReturn: compositeDaily,
+    },
+  };
+}
+

@@ -210,6 +210,41 @@ export interface ProgressEvent {
   error?: string;
 }
 
+// ─── Quant Price Path (single-line, fully calculation-driven) ────────────────
+
+export interface QuantPathPoint {
+  date: string;
+  /** Actual historical close (historical tail only) */
+  actual?: number;
+  /** Quant-composite projected price (forecast only) */
+  quant?: number;
+}
+
+export interface QuantPricePath {
+  points: QuantPathPoint[];
+  currentPrice: number;
+  /** Composite expected 30-day return (decimal) */
+  expectedReturn30d: number;
+  /** Annualised composite drift used for projection */
+  annualDrift: number;
+  /** Human-readable formula breakdown shown in the chart */
+  methodology: string;
+  /** Individual signal contributions (for display) */
+  signals: {
+    ff5Weight: number;
+    momentumWeight: number;
+    scoreWeight: number;
+    macroWeight: number;
+    riskWeight: number;
+    ff5AnnualReturn: number;
+    momentum3MAnnualised: number;
+    scoreAlphaAnnual: number;
+    macroAnnualReturn: number;
+    riskAdjustedAnnualReturn: number;
+    compositeDailyReturn: number;
+  };
+}
+
 // ─── Price Prediction ─────────────────────────────────────────────────────────
 
 export interface PredictionPoint {
@@ -309,6 +344,7 @@ export interface QuantAnalysis {
   kelly?: KellyResult;
   priceHistory: PricePoint[];
   pricePrediction?: PricePrediction;
+  quantPricePath?: QuantPricePath;
   claudeAnalysis?: ClaudeAnalysis;
   claudeError?: string;
   /** Base quant score (fixed 30/25/20/15/10 default weights) */
