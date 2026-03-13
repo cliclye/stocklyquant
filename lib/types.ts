@@ -210,9 +210,53 @@ export interface ProgressEvent {
   error?: string;
 }
 
+// ─── Price Prediction ─────────────────────────────────────────────────────────
+
+export interface PredictionPoint {
+  date: string;
+  /** Actual historical closing price (only set for historical tail) */
+  actual?: number;
+  /** GBM median / expected price (only set for forecast points) */
+  expected?: number;
+  /** Upper 95% confidence bound (only set for forecast points) */
+  upper95?: number;
+  /** Lower 95% confidence bound (only set for forecast points) */
+  lower95?: number;
+  /** Optimistic scenario: drift + 0.5σ (only set for forecast points) */
+  bull?: number;
+  /** Pessimistic scenario: drift − 0.5σ (only set for forecast points) */
+  bear?: number;
+}
+
+export interface PricePrediction {
+  /** Combined 30-day historical tail + 30-day forward forecast */
+  points: PredictionPoint[];
+  currentPrice: number;
+  /** Expected 30-day return as decimal (e.g. 0.05 = +5%) */
+  expectedReturn30d: number;
+  /** 95% CI upper bound at 30 days (decimal) */
+  upperBound30d: number;
+  /** 95% CI lower bound at 30 days (decimal) */
+  lowerBound30d: number;
+  dailyVol: number;
+  annualDrift: number;
+  formulaUsed: string;
+}
+
 // ─── Claude / AI ──────────────────────────────────────────────────────────────
 
-export type FormulaSet = "CAPM" | "FF3" | "FF5" | "APT";
+/**
+ * Formula sets from the quantitative finance research paper.
+ * Factor models: CAPM, FF3, FF5, APT
+ * Composite / hybrid models from the paper:
+ *   SVJ        = Stochastic Volatility + Jump (Heston + Merton)
+ *   Factor-Kelly = Multi-Factor Log-Optimal Kelly
+ *   GARCH-BS   = Volatility-Adjusted Black-Scholes
+ *   Tail-CVaR  = Tail-Risk-Adjusted Factor Model
+ */
+export type FormulaSet =
+  | "CAPM" | "FF3" | "FF5" | "APT"
+  | "SVJ" | "Factor-Kelly" | "GARCH-BS" | "Tail-CVaR";
 export type RiskMetricChoice = "CVaR" | "VaR" | "Sharpe" | "GARCH";
 
 /**
@@ -264,6 +308,7 @@ export interface QuantAnalysis {
   riskMetrics?: RiskMetrics;
   kelly?: KellyResult;
   priceHistory: PricePoint[];
+  pricePrediction?: PricePrediction;
   claudeAnalysis?: ClaudeAnalysis;
   claudeError?: string;
   /** Base quant score (fixed 30/25/20/15/10 default weights) */

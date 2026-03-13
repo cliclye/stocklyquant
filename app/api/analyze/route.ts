@@ -20,6 +20,7 @@ import {
   computeQuantScore,
   computeRiskMetrics,
   computeKelly,
+  computePricePrediction,
   quantScoreLabel,
   computeReturnsFromPrices,
   ANNUAL_RISK_FREE_RATE,
@@ -176,29 +177,41 @@ async function callClaude(
 ): Promise<Omit<ClaudeAnalysis, "aiAdjustedScore">> {
   const systemPrompt = `You are a quantitative research analyst. Your workflow is:
 1. READ the provided raw company data carefully and RESEARCH the stock's current state.
-2. RECOMMEND which quantitative formula family best fits this specific company.
+2. RECOMMEND which quantitative formula from the approved list best fits this specific company.
 3. NEVER calculate any numbers yourself — the quant engine handles all calculations.
 
-Research considerations:
-- Is the company momentum-driven (strong recent returns) or mean-reverting?
-- Does the sector reward value (high B/M, low P/E) or growth (high P/E, strong revenue growth)?
-- Is profitability (ROE, margins — RMW factor) or capital investment behavior (CMA factor) more relevant?
-- For large-cap stable companies: CAPM (single factor) may suffice.
-- For size/value tilts: use FF3.
-- When profitability or investment aggressiveness drives returns: use FF5.
-- For sector-driven, macro-sensitive, or complex multi-driver stocks: use APT.
-- For tail risk: use CVaR or GARCH if volatile or leveraged; Sharpe for stable quality stocks.
+You MUST select "selected_formula" from EXACTLY this list (no other values allowed):
+  FACTOR MODELS (single or multi-factor):
+    "CAPM"         — E[R] = Rf + β·(Rm−Rf). For large-cap, stable, low-idiosyncratic-risk stocks.
+    "FF3"          — Fama-French 3-factor: adds SMB (size) + HML (value). For size/value tilts.
+    "FF5"          — Fama-French 5-factor: adds RMW (profitability) + CMA (investment). When quality/capex allocation drives returns.
+    "APT"          — Arbitrage Pricing Theory (Ross 1976). For sector-driven, rate-sensitive, or macro-exposed stocks.
+  COMPOSITE / HYBRID MODELS (from the research paper):
+    "SVJ"          — Stochastic Volatility + Jump (Heston + Merton). For volatile stocks with fat tails or jump risk.
+    "Factor-Kelly" — Multi-Factor Log-Optimal Kelly. For high-growth, leverage-optimized systematic strategies.
+    "GARCH-BS"     — Volatility-Adjusted Black-Scholes (GARCH forecast → BS drift). For options-like or vol-regime-sensitive stocks.
+    "Tail-CVaR"    — Tail-Risk-Adjusted Factor Model (APT + CVaR constraint). For leveraged or tail-risk-sensitive stocks.
 
-Formula reference from quantitative finance research:
-- CAPM: E[R] = Rf + β*(Rm-Rf) — best for large, stable, low-idiosyncratic-risk companies
-- FF3: adds SMB (size) and HML (value) factors — for clear size or value tilts
-- FF5: adds RMW (profitability) and CMA (investment conservatism) — when quality/capital allocation matters
-- APT: multi-factor with sector/macro premia — for complex, rate-sensitive, or commodity-driven stocks
+Research selection guide:
+- Large stable blue-chip: CAPM or FF3
+- Clear value/size play: FF3 or FF5
+- High-quality profitable compounder: FF5
+- Macro/sector/rate sensitive: APT
+- High vol + jump history (biotech, crypto-adjacent, earnings surprise stocks): SVJ
+- Aggressive growth + levered (Kelly-style sizing): Factor-Kelly
+- Implied-vol or options-context stock: GARCH-BS
+- Distressed, highly leveraged, tail-risk focus: Tail-CVaR
+
+Risk metric selection:
+- CVaR: coherent, for tail-risk-sensitive stocks (leveraged, volatile)
+- VaR: standard regulatory measure for stable portfolios
+- Sharpe: for quality/stable stocks where risk-adjusted return is primary
+- GARCH: for regime-switching or recently volatile stocks
 
 You MUST respond with ONLY valid JSON — no markdown fences, no text outside the JSON.
 Required JSON structure:
 {
-  "selected_formula": "CAPM" | "FF3" | "FF5" | "APT",
+  "selected_formula": <one of the 8 formulas listed above>,
   "recommended_formula": "descriptive name, e.g. Quality-Growth FF5",
   "score_weights": {
     "momentum": <0.0–1.0>,
@@ -281,7 +294,10 @@ Required JSON structure:
 
   const ffe = raw.ff_factor_emphasis ?? {};
 
-  const validFormulas = ["CAPM", "FF3", "FF5", "APT"] as const;
+  const validFormulas = [
+    "CAPM", "FF3", "FF5", "APT",
+    "SVJ", "Factor-Kelly", "GARCH-BS", "Tail-CVaR",
+  ] as const;
   const validRiskMetrics = ["CVaR", "VaR", "Sharpe", "GARCH"] as const;
 
   return {
@@ -477,6 +493,14 @@ export async function POST(req: NextRequest) {
           return computeKelly(expectedReturn, annualVol * annualVol);
         })();
 
+        // Price prediction (GBM using FF5 drift + GARCH vol)
+        const pricePrediction = computePricePrediction(
+          stockBars,
+          famaFrench,
+          volatility,
+          riskMetrics
+        ) ?? undefined;
+
         // Recalculate score with Claude's recommended weights (engine does all calculations)
         if (claudeAnalysis) {
           const aiAdjustedScore = computeQuantScore(
@@ -501,6 +525,7 @@ export async function POST(req: NextRequest) {
           riskMetrics: riskMetrics ?? undefined,
           kelly,
           priceHistory: stockBars,
+          pricePrediction,
           claudeAnalysis,
           claudeError,
           quantScore,

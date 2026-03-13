@@ -7,6 +7,8 @@ import type {
   KellyResult,
   MomentumResult,
   MomentumSignal,
+  PricePrediction,
+  PredictionPoint,
   PricePoint,
   RiskLevel,
   RiskMetrics,
@@ -584,5 +586,97 @@ export function computeKelly(expectedReturn: number, variance: number): KellyRes
     halfKelly: fullKelly / 2,
     expectedReturn,
     variance,
+  };
+}
+
+// ─── Price Prediction (GBM / Log-Normal, BS framework) ───────────────────────
+
+/**
+ * Forward price prediction using Geometric Brownian Motion.
+ *
+ * Drift:     annual expected return from FF5 (or historical Sharpe-adjusted)
+ * Volatility: GARCH(1,1) annualised vol (more regime-responsive) or full-history vol
+ *
+ * Formula (Black–Scholes GBM):
+ *   S(t) = S₀ · exp( (μ - σ²/2)·t  ±  z · σ · √t )
+ *   - Expected / median path: z = 0
+ *   - 95% CI upper:  z = +1.645
+ *   - 95% CI lower:  z = -1.645
+ *   - Bull scenario: z = +0.5
+ *   - Bear scenario: z = -0.5
+ *
+ * Returns last 30 historical candles + 30 forward forecast points.
+ */
+export function computePricePrediction(
+  priceHistory: PricePoint[],
+  famaFrench: FamaFrenchResult | null,
+  volatility: VolatilityResult | null,
+  riskMetrics: RiskMetrics | null,
+  forecastDays = 30
+): PricePrediction | null {
+  if (!volatility || priceHistory.length < 5) return null;
+
+  const sorted = [...priceHistory].sort(
+    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+
+  const currentPrice = sorted[sorted.length - 1].price;
+  const lastDate = new Date(sorted[sorted.length - 1].date);
+
+  // Annual drift — prefer FF5 expected return; fall back to Sharpe-implied
+  const annualDrift = famaFrench
+    ? famaFrench.expectedExcessReturn + ANNUAL_RISK_FREE_RATE
+    : volatility.sharpeRatio * volatility.annualizedVolatility + ANNUAL_RISK_FREE_RATE;
+
+  // Daily parameters (GARCH vol is more responsive to recent regime)
+  const annualVol = riskMetrics?.garchVol ?? volatility.annualizedVolatility;
+  const dailyDrift = annualDrift / 252;
+  const dailyVol = annualVol / Math.sqrt(252);
+
+  // ── Historical tail (last 30 trading days) ──────────────────────────────
+  const histPoints: PredictionPoint[] = sorted.slice(-30).map((p) => ({
+    date: p.date,
+    actual: parseFloat(p.price.toFixed(2)),
+  }));
+
+  // ── Forward forecast (30 trading-day steps) ──────────────────────────────
+  const forecastPoints: PredictionPoint[] = [];
+  for (let t = 1; t <= forecastDays; t++) {
+    // Advance by calendar days (~1.4× to approximate trading days)
+    const fd = new Date(lastDate);
+    fd.setDate(fd.getDate() + Math.round(t * 1.4));
+    const dateStr = fd.toISOString().slice(0, 10);
+
+    // GBM log-drift and diffusion terms
+    const logDrift = (dailyDrift - 0.5 * dailyVol * dailyVol) * t;
+    const diffusion = dailyVol * Math.sqrt(t);
+
+    const snap = (v: number) => parseFloat(v.toFixed(2));
+
+    forecastPoints.push({
+      date: dateStr,
+      expected: snap(currentPrice * Math.exp(logDrift)),
+      upper95:  snap(currentPrice * Math.exp(logDrift + 1.645 * diffusion)),
+      lower95:  snap(currentPrice * Math.exp(logDrift - 1.645 * diffusion)),
+      bull:     snap(currentPrice * Math.exp(logDrift + 0.5  * diffusion)),
+      bear:     snap(currentPrice * Math.exp(logDrift - 0.5  * diffusion)),
+    });
+  }
+
+  // 30-day terminal summary stats
+  const logDrift30 = (dailyDrift - 0.5 * dailyVol * dailyVol) * forecastDays;
+  const diffusion30 = dailyVol * Math.sqrt(forecastDays);
+
+  return {
+    points: [...histPoints, ...forecastPoints],
+    currentPrice,
+    expectedReturn30d: Math.exp(logDrift30) - 1,
+    upperBound30d:     Math.exp(logDrift30 + 1.645 * diffusion30) - 1,
+    lowerBound30d:     Math.exp(logDrift30 - 1.645 * diffusion30) - 1,
+    dailyVol,
+    annualDrift,
+    formulaUsed: riskMetrics
+      ? "GBM · FF5 drift · GARCH(1,1) vol"
+      : "GBM · FF5 drift · Historical vol",
   };
 }
