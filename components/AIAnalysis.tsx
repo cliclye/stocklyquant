@@ -1,151 +1,111 @@
 "use client";
 import type { ClaudeAnalysis } from "@/lib/types";
-import { Brain, TrendingUp, AlertTriangle, Info } from "lucide-react";
+import { Brain, BarChart2, Scale, Info } from "lucide-react";
 
 interface Props {
   analysis: ClaudeAnalysis;
 }
 
-const RATING_COLORS: Record<string, string> = {
-  strong_buy: "text-emerald-400",
-  buy: "text-green-400",
-  neutral: "text-yellow-400",
-  sell: "text-orange-400",
-  strong_sell: "text-red-400",
+const FORMULA_COLORS: Record<string, string> = {
+  CAPM: "bg-blue-900/50 text-blue-300 border-blue-700",
+  FF3:  "bg-teal-900/50 text-teal-300 border-teal-700",
+  FF5:  "bg-purple-900/50 text-purple-300 border-purple-700",
+  APT:  "bg-orange-900/50 text-orange-300 border-orange-700",
 };
 
-const CONFIDENCE_COLORS: Record<string, string> = {
-  high: "bg-green-900/50 text-green-300 border-green-700",
-  medium: "bg-yellow-900/50 text-yellow-300 border-yellow-700",
-  low: "bg-red-900/50 text-red-300 border-red-700",
+const RISK_COLORS: Record<string, string> = {
+  CVaR:   "bg-red-900/50 text-red-300 border-red-700",
+  VaR:    "bg-orange-900/50 text-orange-300 border-orange-700",
+  Sharpe: "bg-green-900/50 text-green-300 border-green-700",
+  GARCH:  "bg-yellow-900/50 text-yellow-300 border-yellow-700",
 };
 
-function FactorBar({ label, value }: { label: string; value: number }) {
+function WeightBar({ label, value, color = "bg-blue-500" }: { label: string; value: number; color?: string }) {
   const pct = Math.round(value * 100);
   return (
     <div>
       <div className="flex justify-between text-xs mb-1">
         <span className="text-gray-400">{label}</span>
-        <span className="text-gray-300">{pct}%</span>
+        <span className="text-gray-300 font-medium">{pct}%</span>
       </div>
       <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-        <div
-          className="h-full bg-blue-500 rounded-full"
-          style={{ width: `${pct}%` }}
-        />
+        <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
 }
 
 export default function AIAnalysis({ analysis }: Props) {
-  const ratingDisplay = analysis.prediction.rating
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-  const ratingColor = RATING_COLORS[analysis.prediction.rating] ?? "text-gray-300";
-  const confClass = CONFIDENCE_COLORS[analysis.prediction.confidence] ?? "";
-  const returnPct = analysis.prediction.expectedAnnualReturnPct;
+  const formulaClass = FORMULA_COLORS[analysis.selectedFormula] ?? "bg-gray-800 text-gray-300 border-gray-600";
+  const riskClass    = RISK_COLORS[analysis.riskMetric]          ?? "bg-gray-800 text-gray-300 border-gray-600";
 
   return (
     <div className="space-y-5">
-      {/* Header card */}
+      {/* Header */}
       <div className="bg-gradient-to-br from-purple-900/40 to-blue-900/40 border border-purple-700/50 rounded-xl p-5">
         <div className="flex items-center gap-2 mb-4">
           <Brain size={18} className="text-purple-400" />
-          <span className="text-sm font-semibold text-purple-300">Claude AI Analysis</span>
+          <span className="text-sm font-semibold text-purple-300">AI Formula Selection</span>
         </div>
-        <div className="grid grid-cols-3 gap-4">
-          <div className="text-center">
-            <p className="text-xs text-gray-400 mb-1">AI Rating</p>
-            <p className={`text-lg font-bold ${ratingColor}`}>{ratingDisplay}</p>
-          </div>
-          <div className="text-center">
-            <p className="text-xs text-gray-400 mb-1">Expected Return</p>
-            <p className={`text-lg font-bold ${returnPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {returnPct >= 0 ? "+" : ""}{returnPct.toFixed(1)}%
-            </p>
-          </div>
-          <div className="text-center">
-            <p className="text-xs text-gray-400 mb-1">AI Score</p>
-            <p className="text-lg font-bold text-white">{analysis.adjustedQuantScore.toFixed(0)}</p>
-          </div>
-        </div>
-        <div className="flex justify-center gap-2 mt-4">
-          <span className={`text-xs border rounded-full px-2 py-0.5 ${confClass}`}>
-            {analysis.prediction.confidence} confidence
-          </span>
-          <span className="text-xs border border-gray-600 rounded-full px-2 py-0.5 text-gray-400">
-            {analysis.prediction.investmentHorizon}-term horizon
-          </span>
-        </div>
-      </div>
 
-      {/* Factor Importance */}
-      <div className="bg-gray-800/60 rounded-xl p-5">
-        <h4 className="text-sm font-semibold text-gray-200 mb-4">Factor Importance</h4>
-        <div className="space-y-3">
-          <FactorBar label="Market (β₁)" value={analysis.factorImportance.market} />
-          <FactorBar label="Size SMB (β₂)" value={analysis.factorImportance.smb} />
-          <FactorBar label="Value HML (β₃)" value={analysis.factorImportance.hml} />
-          <FactorBar label="Profitability RMW" value={analysis.factorImportance.rmw} />
-          <FactorBar label="Investment CMA" value={analysis.factorImportance.cma} />
+        <div className="grid grid-cols-3 gap-4 mb-4">
+          <div className="text-center">
+            <p className="text-xs text-gray-400 mb-1">Factor Model</p>
+            <span className={`inline-block text-sm font-bold border rounded-lg px-2 py-0.5 ${formulaClass}`}>
+              {analysis.selectedFormula}
+            </span>
+          </div>
+          <div className="text-center">
+            <p className="text-xs text-gray-400 mb-1">Risk Metric</p>
+            <span className={`inline-block text-sm font-bold border rounded-lg px-2 py-0.5 ${riskClass}`}>
+              {analysis.riskMetric}
+            </span>
+          </div>
+          <div className="text-center">
+            <p className="text-xs text-gray-400 mb-1">AI-Adj. Score</p>
+            <p className="text-lg font-bold text-white">{analysis.aiAdjustedScore.toFixed(0)}</p>
+          </div>
         </div>
+
+        <p className="text-xs text-purple-200/80 font-medium">{analysis.recommendedFormula}</p>
       </div>
 
       {/* Score Weights */}
       <div className="bg-gray-800/60 rounded-xl p-5">
-        <h4 className="text-sm font-semibold text-gray-200 mb-4">AI-Optimized Score Weights</h4>
+        <div className="flex items-center gap-2 mb-4">
+          <Scale size={15} className="text-blue-400" />
+          <h4 className="text-sm font-semibold text-gray-200">AI-Recommended Score Weights</h4>
+        </div>
         <div className="space-y-3">
-          <FactorBar label="Momentum" value={analysis.scoreWeights.momentum} />
-          <FactorBar label="Value" value={analysis.scoreWeights.value} />
-          <FactorBar label="Quality" value={analysis.scoreWeights.quality} />
-          <FactorBar label="Size" value={analysis.scoreWeights.size} />
-          <FactorBar label="Volatility" value={analysis.scoreWeights.volatility} />
+          <WeightBar label="Momentum"   value={analysis.scoreWeights.momentum}   color="bg-blue-500" />
+          <WeightBar label="Value"      value={analysis.scoreWeights.value}      color="bg-teal-500" />
+          <WeightBar label="Quality"    value={analysis.scoreWeights.quality}    color="bg-purple-500" />
+          <WeightBar label="Size"       value={analysis.scoreWeights.size}       color="bg-orange-500" />
+          <WeightBar label="Volatility" value={analysis.scoreWeights.volatility} color="bg-red-400" />
         </div>
       </div>
 
-      {/* Insights */}
-      {analysis.insights.length > 0 && (
-        <div className="bg-gray-800/60 rounded-xl p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <TrendingUp size={15} className="text-blue-400" />
-            <h4 className="text-sm font-semibold text-gray-200">Key Insights</h4>
-          </div>
-          <ul className="space-y-2">
-            {analysis.insights.map((insight, i) => (
-              <li key={i} className="flex gap-2 text-sm text-gray-300">
-                <span className="text-blue-400 mt-0.5 shrink-0">•</span>
-                {insight}
-              </li>
-            ))}
-          </ul>
+      {/* FF Factor Emphasis */}
+      <div className="bg-gray-800/60 rounded-xl p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <BarChart2 size={15} className="text-blue-400" />
+          <h4 className="text-sm font-semibold text-gray-200">Factor Relevance for This Stock</h4>
         </div>
-      )}
-
-      {/* Risks */}
-      {analysis.keyRisks.length > 0 && (
-        <div className="bg-gray-800/60 rounded-xl p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <AlertTriangle size={15} className="text-orange-400" />
-            <h4 className="text-sm font-semibold text-gray-200">Key Risks</h4>
-          </div>
-          <ul className="space-y-2">
-            {analysis.keyRisks.map((risk, i) => (
-              <li key={i} className="flex gap-2 text-sm text-gray-300">
-                <span className="text-orange-400 mt-0.5 shrink-0">▲</span>
-                {risk}
-              </li>
-            ))}
-          </ul>
+        <div className="space-y-3">
+          <WeightBar label="Market (β₁)"          value={analysis.ffFactorEmphasis.market} color="bg-blue-500" />
+          <WeightBar label="Size SMB (β₂)"        value={analysis.ffFactorEmphasis.smb}    color="bg-teal-500" />
+          <WeightBar label="Value HML (β₃)"       value={analysis.ffFactorEmphasis.hml}    color="bg-yellow-500" />
+          <WeightBar label="Profitability RMW (β₄)" value={analysis.ffFactorEmphasis.rmw} color="bg-purple-500" />
+          <WeightBar label="Investment CMA (β₅)"  value={analysis.ffFactorEmphasis.cma}   color="bg-orange-500" />
         </div>
-      )}
+      </div>
 
-      {/* Formula note */}
-      {analysis.formulaNote && (
+      {/* Rationale */}
+      {analysis.rationale && (
         <div className="bg-gray-800/40 rounded-xl p-4 border border-gray-700/50">
           <div className="flex gap-2 items-start">
             <Info size={14} className="text-gray-500 mt-0.5 shrink-0" />
-            <p className="text-xs text-gray-400">{analysis.formulaNote}</p>
+            <p className="text-xs text-gray-400 leading-relaxed">{analysis.rationale}</p>
           </div>
         </div>
       )}

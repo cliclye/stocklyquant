@@ -4,10 +4,12 @@ import type {
   FamaFrenchResult,
   FMPBalanceSheet,
   FMPIncomeStatement,
+  KellyResult,
   MomentumResult,
   MomentumSignal,
   PricePoint,
   RiskLevel,
+  RiskMetrics,
   ValueMetrics,
   VolatilityResult,
 } from "./types";
@@ -407,39 +409,75 @@ export function computeVolatility(priceHistory: PricePoint[]): VolatilityResult 
 
 // ─── Quant Score ──────────────────────────────────────────────────────────────
 
-export function computeQuantScore(params: {
-  momentum?: MomentumResult | null;
-  valueMetrics?: ValueMetrics | null;
-  famaFrench?: FamaFrenchResult | null;
-  volatility?: VolatilityResult | null;
-}): number {
+export interface ScoreWeights {
+  momentum: number;
+  value: number;
+  quality: number;
+  size: number;
+  volatility: number;
+}
+
+/** Default fixed weights (sum = 1.0) */
+export const DEFAULT_WEIGHTS: ScoreWeights = {
+  momentum: 0.30,
+  value: 0.25,
+  quality: 0.20,
+  size: 0.15,
+  volatility: 0.10,
+};
+
+export function computeQuantScore(
+  params: {
+    momentum?: MomentumResult | null;
+    valueMetrics?: ValueMetrics | null;
+    famaFrench?: FamaFrenchResult | null;
+    volatility?: VolatilityResult | null;
+  },
+  weights?: Partial<ScoreWeights>
+): number {
+  const raw = {
+    momentum:   weights?.momentum   ?? DEFAULT_WEIGHTS.momentum,
+    value:      weights?.value      ?? DEFAULT_WEIGHTS.value,
+    quality:    weights?.quality    ?? DEFAULT_WEIGHTS.quality,
+    size:       weights?.size       ?? DEFAULT_WEIGHTS.size,
+    volatility: weights?.volatility ?? DEFAULT_WEIGHTS.volatility,
+  };
+  const total = raw.momentum + raw.value + raw.quality + raw.size + raw.volatility || 1;
+  const w = {
+    momentum:   raw.momentum   / total,
+    value:      raw.value      / total,
+    quality:    raw.quality    / total,
+    size:       raw.size       / total,
+    volatility: raw.volatility / total,
+  };
+
   let score = 50;
 
   if (params.momentum) {
     const momScore = Math.min(Math.max(((params.momentum.momentum12M - 0.7) / 0.8) * 100, 0), 100);
-    score += (momScore - 50) * 0.3;
+    score += (momScore - 50) * w.momentum;
   }
   if (params.valueMetrics?.bookToMarket !== undefined) {
     const valScore = Math.min(Math.max((params.valueMetrics.bookToMarket / 1.5) * 100, 0), 100);
-    score += (valScore - 50) * 0.25;
+    score += (valScore - 50) * w.value;
   }
   if (params.valueMetrics?.roe !== undefined) {
     const qualScore = Math.min(
       Math.max(((params.valueMetrics.roe + 0.05) / 0.4) * 100, 0),
       100
     );
-    score += (qualScore - 50) * 0.2;
+    score += (qualScore - 50) * w.quality;
   }
   if (params.famaFrench) {
     const sizeScore = params.famaFrench.betas.smbBeta > 0 ? 65 : 40;
-    score += (sizeScore - 50) * 0.15;
+    score += (sizeScore - 50) * w.size;
   }
   if (params.volatility) {
     const volScore = Math.min(
       Math.max(((0.6 - params.volatility.annualizedVolatility) / 0.6) * 100, 0),
       100
     );
-    score += (volScore - 50) * 0.1;
+    score += (volScore - 50) * w.volatility;
   }
 
   return Math.min(Math.max(score, 0), 100);
@@ -469,4 +507,82 @@ export function computeReturnsFromPrices(prices: PricePoint[]): DailyReturn[] {
     if (prev > 0) returns.push({ date: prices[i].date, returnValue: (curr - prev) / prev });
   }
   return returns;
+}
+
+// ─── Risk Metrics (VaR / CVaR / GARCH) ───────────────────────────────────────
+
+/**
+ * Compute Historical VaR, CVaR and GARCH(1,1) annualised volatility.
+ * Uses daily log-returns derived from the price history.
+ */
+export function computeRiskMetrics(priceHistory: PricePoint[]): RiskMetrics | null {
+  if (priceHistory.length < 60) return null;
+
+  const sorted = [...priceHistory].sort(
+    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+
+  // Daily log-returns
+  const returns: number[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1].price;
+    const curr = sorted[i].price;
+    if (prev > 0 && curr > 0) returns.push(Math.log(curr / prev));
+  }
+  if (returns.length < 60) return null;
+
+  // ── Historical VaR & CVaR ────────────────────────────────────────────────
+  const asc = [...returns].sort((a, b) => a - b);
+  const n = asc.length;
+
+  // 5th-percentile index for 95% VaR
+  const cut95 = Math.max(Math.floor(n * 0.05), 1);
+  const cut99 = Math.max(Math.floor(n * 0.01), 1);
+
+  // VaR = loss at that quantile (positive number)
+  const var95 = -asc[cut95 - 1];
+  const var99 = -asc[cut99 - 1];
+
+  // CVaR = average of the tail below the VaR quantile
+  const tail95 = asc.slice(0, cut95);
+  const tail99 = asc.slice(0, cut99);
+  const cvar95 = -(tail95.reduce((s, v) => s + v, 0) / tail95.length);
+  const cvar99 = -(tail99.reduce((s, v) => s + v, 0) / tail99.length);
+
+  // ── GARCH(1,1) — standard equity parameters ──────────────────────────────
+  // omega=1e-6, alpha=0.09, beta=0.90 are typical starting values for equities.
+  // We run the recursion over the full return series to get the terminal h_T,
+  // then annualise it.
+  const omega = 1e-6;
+  const alpha = 0.09;
+  const beta  = 0.90;
+
+  const meanRet = returns.reduce((s, r) => s + r, 0) / returns.length;
+  const sampleVar = returns.reduce((s, r) => s + (r - meanRet) ** 2, 0) / returns.length;
+
+  let h = sampleVar;
+  for (const r of returns) {
+    h = omega + alpha * r * r + beta * h;
+  }
+
+  const garchVol = Math.sqrt(h * 252); // annualised
+
+  return { var95, var99, cvar95, cvar99, garchVol };
+}
+
+// ─── Kelly Criterion ──────────────────────────────────────────────────────────
+
+/**
+ * Classical continuous Kelly fraction:  f* = (μ - rf) / σ²
+ * Returns both full Kelly and the conservative half-Kelly.
+ */
+export function computeKelly(expectedReturn: number, variance: number): KellyResult {
+  const excessReturn = expectedReturn - ANNUAL_RISK_FREE_RATE;
+  const fullKelly = variance > 0 ? excessReturn / variance : 0;
+  return {
+    fullKelly,
+    halfKelly: fullKelly / 2,
+    expectedReturn,
+    variance,
+  };
 }

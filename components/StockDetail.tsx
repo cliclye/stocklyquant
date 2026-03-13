@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { BookmarkPlus, BookmarkCheck, TrendingUp, Activity, DollarSign, BarChart2, AlertCircle } from "lucide-react";
+import { BookmarkPlus, BookmarkCheck, TrendingUp, Activity, DollarSign, BarChart2, AlertCircle, Shield, Calculator } from "lucide-react";
 import type { QuantAnalysis } from "@/lib/types";
 import { PriceChart } from "./Charts";
 import AIAnalysis from "./AIAnalysis";
@@ -109,7 +109,7 @@ export default function StockDetail({ analysis }: Props) {
           )}
           {analysis.claudeAnalysis && (
             <div className="text-white/80 text-sm mt-1">
-              AI Score: {analysis.claudeAnalysis.adjustedQuantScore.toFixed(0)}
+              AI Score: {analysis.claudeAnalysis.aiAdjustedScore.toFixed(0)}
             </div>
           )}
           <button
@@ -208,6 +208,41 @@ export default function StockDetail({ analysis }: Props) {
               </div>
             </>
           )}
+
+          {/* VaR / CVaR / GARCH */}
+          {analysis.riskMetrics && (() => {
+            const rm = analysis.riskMetrics!;
+            return (
+              <>
+                <SectionHeader icon={Shield} label="Value-at-Risk & Expected Shortfall" />
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <MetricCard label="VaR 95% (1-day)" value={pct(rm.var95)} sub="Historical" />
+                  <MetricCard label="VaR 99% (1-day)" value={pct(rm.var99)} sub="Historical" />
+                  <MetricCard label="CVaR 95%" value={pct(rm.cvar95)} sub="Exp. Shortfall" />
+                  <MetricCard label="CVaR 99%" value={pct(rm.cvar99)} sub="Exp. Shortfall" />
+                  <MetricCard label="GARCH Vol (ann.)" value={pct(rm.garchVol)} sub="GARCH(1,1)" />
+                </div>
+              </>
+            );
+          })()}
+
+          {/* Kelly Criterion */}
+          {analysis.kelly && (() => {
+            const k = analysis.kelly!;
+            const halfPct = (k.halfKelly * 100).toFixed(1);
+            const fullPct = (k.fullKelly * 100).toFixed(1);
+            return (
+              <>
+                <SectionHeader icon={Calculator} label="Kelly Criterion (Position Sizing)" />
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <MetricCard label="Half Kelly" value={`${halfPct}%`} sub="Recommended sizing" />
+                  <MetricCard label="Full Kelly" value={`${fullPct}%`} sub="Raw (use with caution)" />
+                  <MetricCard label="Expected Return" value={pct(k.expectedReturn)} sub="Annual (incl. Rf)" />
+                  <MetricCard label="Variance" value={fmt(k.variance, 4)} sub="Annualised σ²" />
+                </div>
+              </>
+            );
+          })()}
 
           {/* Value Metrics */}
           {val && (

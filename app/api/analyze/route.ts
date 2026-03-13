@@ -17,6 +17,8 @@ import {
   computeMomentum,
   computeVolatility,
   computeQuantScore,
+  computeRiskMetrics,
+  computeKelly,
   quantScoreLabel,
   computeReturnsFromPrices,
   ANNUAL_RISK_FREE_RATE,
@@ -67,123 +69,6 @@ async function fmpGet<T>(path: string, fmpKey: string): Promise<T> {
   return res.json();
 }
 
-// ─── Claude call ──────────────────────────────────────────────────────────────
-
-async function callClaude(
-  prompt: string,
-  claudeKey: string
-): Promise<ClaudeAnalysis> {
-  const systemPrompt = `You are a quantitative finance expert. Analyze the provided stock metrics and determine:
-1. Which Fama-French factors are most important for THIS specific stock
-2. The optimal multi-factor score weights for this stock's characteristics
-3. A predicted annual return with confidence level
-4. Key insights and risks
-
-You MUST respond with ONLY valid JSON — no markdown, no explanation outside the JSON.
-Required JSON structure:
-{
-  "factor_importance": { "market": 0.0-1.0, "smb": 0.0-1.0, "hml": 0.0-1.0, "rmw": 0.0-1.0, "cma": 0.0-1.0 },
-  "score_weights": { "momentum": 0.0-1.0, "value": 0.0-1.0, "quality": 0.0-1.0, "size": 0.0-1.0, "volatility": 0.0-1.0 },
-  "prediction": {
-    "expected_annual_return_pct": number,
-    "confidence": "low|medium|high",
-    "investment_horizon": "short|medium|long",
-    "rating": "strong_buy|buy|neutral|sell|strong_sell"
-  },
-  "insights": ["insight1", "insight2", "insight3"],
-  "key_risks": ["risk1", "risk2"],
-  "formula_note": "why you chose these weights",
-  "adjusted_quant_score": 0-100
-}`;
-
-  const body = {
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 1024,
-    system: systemPrompt,
-    messages: [{ role: "user", content: prompt }],
-  };
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": claudeKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-
-  // Read as text first — res.json() itself throws on empty bodies
-  const rawBody = await res.text();
-
-  // Try to parse the body as JSON (may fail for HTML error pages, empty bodies, etc.)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let env: any = {};
-  if (rawBody.trim()) {
-    try { env = JSON.parse(rawBody); } catch { /* body wasn't JSON, env stays {} */ }
-  }
-
-  if (!res.ok) {
-    // Anthropic error envelope: { error: { message: "...", type: "..." } }
-    const msg: string =
-      env?.error?.message ?? `Claude API error (HTTP ${res.status})`;
-    throw new Error(msg);
-  }
-
-  const text: string = env?.content?.[0]?.text ?? "";
-  if (!text.trim()) {
-    throw new Error("Claude returned an empty response — check your API key and account status");
-  }
-
-  // Strip markdown code fences if present
-  let json = text.trim();
-  if (json.startsWith("```")) {
-    json = json.split("\n").slice(1).join("\n");
-    const fence = json.lastIndexOf("```");
-    if (fence !== -1) json = json.slice(0, fence);
-  }
-  json = json.trim();
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let raw: any;
-  try {
-    raw = JSON.parse(json);
-  } catch {
-    throw new Error(`Claude returned non-JSON text: "${json.slice(0, 200)}"`);
-  }
-  const sw = raw.score_weights;
-  const total = sw.momentum + sw.value + sw.quality + sw.size + sw.volatility || 1;
-  const norm = (v: number) => v / total;
-
-  return {
-    factorImportance: {
-      market: raw.factor_importance.market,
-      smb: raw.factor_importance.smb,
-      hml: raw.factor_importance.hml,
-      rmw: raw.factor_importance.rmw,
-      cma: raw.factor_importance.cma,
-    },
-    scoreWeights: {
-      momentum: norm(sw.momentum),
-      value: norm(sw.value),
-      quality: norm(sw.quality),
-      size: norm(sw.size),
-      volatility: norm(sw.volatility),
-    },
-    prediction: {
-      expectedAnnualReturnPct: raw.prediction.expected_annual_return_pct,
-      confidence: raw.prediction.confidence,
-      investmentHorizon: raw.prediction.investment_horizon,
-      rating: raw.prediction.rating,
-    },
-    insights: raw.insights ?? [],
-    keyRisks: raw.key_risks ?? [],
-    formulaNote: raw.formula_note ?? "",
-    adjustedQuantScore: Math.min(Math.max(raw.adjusted_quant_score, 0), 100),
-  };
-}
-
 // ─── Build Claude prompt ──────────────────────────────────────────────────────
 
 function buildClaudePrompt(
@@ -232,9 +117,135 @@ function buildClaudePrompt(
     if (val.peRatio !== undefined) lines.push(`P/E: ${val.peRatio.toFixed(1)}`);
     if (val.pbRatio !== undefined) lines.push(`P/B: ${val.pbRatio.toFixed(2)}`);
     if (val.roe !== undefined) lines.push(`ROE: ${(val.roe * 100).toFixed(1)}%`);
+    if (val.debtToEquity !== undefined) lines.push(`Debt/Equity: ${val.debtToEquity.toFixed(2)}`);
   }
-  lines.push(`\nBase Quant Score: ${baseScore.toFixed(1)}/100`);
+  lines.push(`\nBase Quant Score (default weights): ${baseScore.toFixed(1)}/100`);
   return lines.join("\n");
+}
+
+// ─── Claude call ──────────────────────────────────────────────────────────────
+
+async function callClaude(
+  prompt: string,
+  claudeKey: string
+): Promise<Omit<ClaudeAnalysis, "aiAdjustedScore">> {
+  const systemPrompt = `You are a quantitative finance model selector. Your ONLY job is to analyze the provided stock metrics and recommend the optimal formula parameters for the quant engine. You do NOT make price predictions, issue buy/sell ratings, or calculate any numbers — the quant engine does all calculations.
+
+Choose:
+1. Which factor model best fits this stock: CAPM, FF3, FF5, or APT
+2. Optimal score weights for this stock's profile (must sum to 1.0)
+3. Relative importance of each Fama-French factor (0–1 scale)
+4. Which risk metric should dominate: CVaR, VaR, Sharpe, or GARCH
+5. A concise plain-English rationale (2–3 sentences) explaining your choices
+
+You MUST respond with ONLY valid JSON — no markdown fences, no text outside the JSON.
+Required structure:
+{
+  "selected_formula": "CAPM" | "FF3" | "FF5" | "APT",
+  "recommended_formula": "descriptive name, e.g. Quality-Growth FF5",
+  "score_weights": {
+    "momentum": 0.0–1.0,
+    "value": 0.0–1.0,
+    "quality": 0.0–1.0,
+    "size": 0.0–1.0,
+    "volatility": 0.0–1.0
+  },
+  "ff_factor_emphasis": {
+    "market": 0.0–1.0,
+    "smb": 0.0–1.0,
+    "hml": 0.0–1.0,
+    "rmw": 0.0–1.0,
+    "cma": 0.0–1.0
+  },
+  "risk_metric": "CVaR" | "VaR" | "Sharpe" | "GARCH",
+  "rationale": "2–3 sentence explanation"
+}`;
+
+  const body = {
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 800,
+    system: systemPrompt,
+    messages: [{ role: "user", content: prompt }],
+  };
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": claudeKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+
+  const rawBody = await res.text();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let env: any = {};
+  if (rawBody.trim()) {
+    try { env = JSON.parse(rawBody); } catch { /* not JSON */ }
+  }
+
+  if (!res.ok) {
+    const msg: string = env?.error?.message ?? `Claude API error (HTTP ${res.status})`;
+    throw new Error(msg);
+  }
+
+  const text: string = env?.content?.[0]?.text ?? "";
+  if (!text.trim()) {
+    throw new Error("Claude returned an empty response — check your API key and account status");
+  }
+
+  // Strip markdown code fences if present
+  let json = text.trim();
+  if (json.startsWith("```")) {
+    json = json.split("\n").slice(1).join("\n");
+    const fence = json.lastIndexOf("```");
+    if (fence !== -1) json = json.slice(0, fence);
+  }
+  json = json.trim();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let raw: any;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    throw new Error(`Claude returned non-JSON text: "${json.slice(0, 200)}"`);
+  }
+
+  // Normalise score_weights so they sum to 1
+  const sw = raw.score_weights ?? {};
+  const swTotal =
+    (sw.momentum ?? 0) + (sw.value ?? 0) + (sw.quality ?? 0) +
+    (sw.size ?? 0) + (sw.volatility ?? 0) || 1;
+  const normSW = (v: number) => (v ?? 0) / swTotal;
+
+  const ffe = raw.ff_factor_emphasis ?? {};
+
+  const validFormulas = ["CAPM", "FF3", "FF5", "APT"] as const;
+  const validRiskMetrics = ["CVaR", "VaR", "Sharpe", "GARCH"] as const;
+
+  return {
+    selectedFormula: validFormulas.includes(raw.selected_formula) ? raw.selected_formula : "FF5",
+    recommendedFormula: raw.recommended_formula ?? "FF5",
+    scoreWeights: {
+      momentum:   normSW(sw.momentum),
+      value:      normSW(sw.value),
+      quality:    normSW(sw.quality),
+      size:       normSW(sw.size),
+      volatility: normSW(sw.volatility),
+    },
+    ffFactorEmphasis: {
+      market: ffe.market ?? 0.5,
+      smb:    ffe.smb    ?? 0.3,
+      hml:    ffe.hml    ?? 0.3,
+      rmw:    ffe.rmw    ?? 0.3,
+      cma:    ffe.cma    ?? 0.2,
+    },
+    riskMetric: validRiskMetrics.includes(raw.risk_metric) ? raw.risk_metric : "CVaR",
+    rationale: raw.rationale ?? "",
+  };
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -337,15 +348,32 @@ export async function POST(req: NextRequest) {
     );
     const momentum = computeMomentum(stockBars);
     const volatility = computeVolatility(stockBars);
+    const riskMetrics = computeRiskMetrics(stockBars);
+
+    // Base quant score with default 30/25/20/15/10 weights
     const quantScore = computeQuantScore({ momentum, valueMetrics, famaFrench, volatility });
 
-    // Claude analysis (optional)
+    // Kelly Criterion — use FF5 expected excess return and annualised variance
+    const kelly = (() => {
+      if (!famaFrench || !volatility) return undefined;
+      const expectedReturn = famaFrench.expectedExcessReturn + ANNUAL_RISK_FREE_RATE;
+      const annualVol = volatility.annualizedVolatility;
+      return computeKelly(expectedReturn, annualVol * annualVol);
+    })();
+
+    // Claude analysis (optional) — formula selector only
     let claudeAnalysis: ClaudeAnalysis | undefined;
     let claudeError: string | undefined;
     if (claudeKey) {
       try {
         const prompt = buildClaudePrompt(ticker, profile, famaFrench, momentum, volatility, valueMetrics, quantScore);
-        claudeAnalysis = await callClaude(prompt, claudeKey);
+        const partial = await callClaude(prompt, claudeKey);
+        // Engine recalculates score using Claude's recommended weights
+        const aiAdjustedScore = computeQuantScore(
+          { momentum, valueMetrics, famaFrench, volatility },
+          partial.scoreWeights
+        );
+        claudeAnalysis = { ...partial, aiAdjustedScore };
       } catch (err) {
         claudeError = err instanceof Error ? err.message : "Claude analysis failed";
         console.error("[Claude]", claudeError);
@@ -361,6 +389,8 @@ export async function POST(req: NextRequest) {
       momentum: momentum ?? undefined,
       volatility: volatility ?? undefined,
       valueMetrics,
+      riskMetrics: riskMetrics ?? undefined,
+      kelly,
       priceHistory: stockBars,
       claudeAnalysis,
       claudeError,

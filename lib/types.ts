@@ -162,16 +162,48 @@ export interface ValueMetrics {
   valueSignal: string;
 }
 
+// ─── Extended Risk & Sizing Metrics ──────────────────────────────────────────
+
+/** Historical Value-at-Risk and Expected Shortfall (CVaR) */
+export interface RiskMetrics {
+  /** 1-day 95% Historical VaR (as positive decimal, e.g. 0.03 = 3%) */
+  var95: number;
+  /** 1-day 99% Historical VaR */
+  var99: number;
+  /** 1-day 95% CVaR / Expected Shortfall */
+  cvar95: number;
+  /** 1-day 99% CVaR */
+  cvar99: number;
+  /** Annualised volatility from GARCH(1,1) fit */
+  garchVol: number;
+}
+
+/** Kelly Criterion result */
+export interface KellyResult {
+  /** Full Kelly fraction (can exceed 1 — raw) */
+  fullKelly: number;
+  /** Half-Kelly (recommended conservative sizing) */
+  halfKelly: number;
+  /** Annualised expected return used in the calculation */
+  expectedReturn: number;
+  /** Variance used in the calculation */
+  variance: number;
+}
+
 // ─── Claude / AI ──────────────────────────────────────────────────────────────
 
+export type FormulaSet = "CAPM" | "FF3" | "FF5" | "APT";
+export type RiskMetricChoice = "CVaR" | "VaR" | "Sharpe" | "GARCH";
+
+/**
+ * Claude's ONLY job is formula selection — it tells the quant engine
+ * WHICH formula and weights to use.  It does NOT make predictions,
+ * issue ratings, or calculate any numbers itself.
+ */
 export interface ClaudeAnalysis {
-  factorImportance: {
-    market: number;
-    smb: number;
-    hml: number;
-    rmw: number;
-    cma: number;
-  };
+  /** Primary factor model Claude recommends for this stock */
+  selectedFormula: FormulaSet;
+  /** Recommended weights for the 5-factor score (normalised to sum=1) */
   scoreWeights: {
     momentum: number;
     value: number;
@@ -179,16 +211,22 @@ export interface ClaudeAnalysis {
     size: number;
     volatility: number;
   };
-  prediction: {
-    expectedAnnualReturnPct: number;
-    confidence: "low" | "medium" | "high";
-    investmentHorizon: "short" | "medium" | "long";
-    rating: "strong_buy" | "buy" | "neutral" | "sell" | "strong_sell";
+  /** Relative importance of each FF factor for this stock (0–1) */
+  ffFactorEmphasis: {
+    market: number;
+    smb: number;
+    hml: number;
+    rmw: number;
+    cma: number;
   };
-  insights: string[];
-  keyRisks: string[];
-  formulaNote: string;
-  adjustedQuantScore: number;
+  /** Which risk metric should dominate the risk component */
+  riskMetric: RiskMetricChoice;
+  /** Human-readable name for the chosen formula, e.g. "Quality-Growth FF5" */
+  recommendedFormula: string;
+  /** Plain-English rationale: why these weights suit this stock's profile */
+  rationale: string;
+  /** Score recalculated by the engine using Claude's recommended weights */
+  aiAdjustedScore: number;
 }
 
 // ─── Master Analysis ──────────────────────────────────────────────────────────
@@ -202,9 +240,12 @@ export interface QuantAnalysis {
   momentum?: MomentumResult;
   volatility?: VolatilityResult;
   valueMetrics?: ValueMetrics;
+  riskMetrics?: RiskMetrics;
+  kelly?: KellyResult;
   priceHistory: PricePoint[];
   claudeAnalysis?: ClaudeAnalysis;
   claudeError?: string;
+  /** Base quant score (fixed 30/25/20/15/10 default weights) */
   quantScore: number;
   quantScoreLabel: string;
 }
