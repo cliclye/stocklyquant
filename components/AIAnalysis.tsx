@@ -41,6 +41,17 @@ export default function AIAnalysis({ analysis }: Props) {
 
   return (
     <div className="space-y-5">
+      {/* Research Summary */}
+      {analysis.researchSummary && (
+        <div className="bg-gray-800/40 rounded-xl p-4 border border-purple-700/30">
+          <div className="flex items-center gap-2 mb-2">
+            <Brain size={14} className="text-purple-400" />
+            <span className="text-xs font-semibold text-purple-300 uppercase tracking-wide">Claude Research Summary</span>
+          </div>
+          <p className="text-sm text-gray-300 leading-relaxed">{analysis.researchSummary}</p>
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-gradient-to-br from-purple-900/40 to-blue-900/40 border border-purple-700/50 rounded-xl p-5">
         <div className="flex items-center gap-2 mb-4">

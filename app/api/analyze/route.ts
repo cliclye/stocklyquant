@@ -11,6 +11,7 @@ import type {
   ValueMetrics,
   QuantAnalysis,
   ClaudeAnalysis,
+  ProgressEvent,
 } from "@/lib/types";
 import {
   computeFamaFrenchFiveFactor,
@@ -69,103 +70,160 @@ async function fmpGet<T>(path: string, fmpKey: string): Promise<T> {
   return res.json();
 }
 
-// ─── Build Claude prompt ──────────────────────────────────────────────────────
+// ─── Format helpers ───────────────────────────────────────────────────────────
 
-function buildClaudePrompt(
+function fmtPct(v: number) {
+  return `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
+}
+
+function fmtB(v: number | undefined | null) {
+  if (v == null) return "N/A";
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
+  if (abs >= 1e6) return `$${(v / 1e6).toFixed(0)}M`;
+  return `$${v.toFixed(0)}`;
+}
+
+function fmtNum(v: number | undefined | null, decimals = 1) {
+  if (v == null) return "N/A";
+  return v.toFixed(decimals);
+}
+
+// ─── Build Claude research prompt (raw company data, no pre-computed metrics) ─
+
+function buildClaudeResearchPrompt(
   ticker: string,
   profile: FMPProfile | null,
-  ff: ReturnType<typeof computeFamaFrenchFiveFactor>,
-  mom: ReturnType<typeof computeMomentum>,
-  vol: ReturnType<typeof computeVolatility>,
-  val: ValueMetrics | null,
-  baseScore: number
+  incomeStatements: FMPIncomeStatement[],
+  balanceSheets: FMPBalanceSheet[],
+  metricsArr: FMPKeyMetrics[],
+  ratiosArr: FMPRatios[],
+  return3M: number,
+  return12M: number
 ): string {
   const lines: string[] = [];
-  lines.push(`Stock: ${ticker}`);
+
+  lines.push(`=== STOCK RESEARCH REQUEST: ${ticker} ===`);
+
   if (profile) {
     lines.push(`Company: ${profile.companyName}`);
-    lines.push(`Sector: ${profile.sector ?? "Unknown"}`);
-    lines.push(`Industry: ${profile.industry ?? "Unknown"}`);
+    lines.push(`Sector: ${profile.sector ?? "Unknown"} | Industry: ${profile.industry ?? "Unknown"}`);
+    lines.push(`Exchange: ${profile.exchange ?? "Unknown"} | Market Cap: ${fmtB(profile.mktCap ?? null)}`);
+    if (profile.beta != null) lines.push(`Market Beta: ${fmtNum(profile.beta, 2)}`);
+    if (profile.description) {
+      lines.push(`Description: ${profile.description.slice(0, 400)}`);
+    }
   }
-  lines.push("\n--- Fama-French Five-Factor Betas ---");
-  if (ff) {
-    lines.push(`Market β: ${ff.betas.marketBeta.toFixed(3)}`);
-    lines.push(`SMB β: ${ff.betas.smbBeta.toFixed(3)}`);
-    lines.push(`HML β: ${ff.betas.hmlBeta.toFixed(3)}`);
-    lines.push(`RMW β: ${ff.rmwBeta.toFixed(3)}`);
-    lines.push(`CMA β: ${ff.cmaBeta.toFixed(3)}`);
-    lines.push(`Alpha (ann.): ${(ff.betas.alpha * 100).toFixed(3)}%`);
-    lines.push(`R²: ${ff.betas.rSquared.toFixed(3)}`);
-    lines.push(`FF5 Expected Annual Return: ${((ff.expectedExcessReturn + ANNUAL_RISK_FREE_RATE) * 100).toFixed(2)}%`);
+
+  lines.push("\n=== RECENT PRICE PERFORMANCE ===");
+  lines.push(`Last 3-Month Return: ${fmtPct(return3M)}`);
+  lines.push(`Last 12-Month Return: ${fmtPct(return12M)}`);
+
+  if (incomeStatements.length > 0) {
+    lines.push("\n=== EARNINGS HISTORY (most recent annual periods) ===");
+    for (const inc of incomeStatements.slice(0, 4)) {
+      const margin =
+        inc.revenue && inc.revenue > 0 && inc.operatingIncome != null
+          ? ((inc.operatingIncome / inc.revenue) * 100).toFixed(1) + "%"
+          : "N/A";
+      lines.push(
+        `${inc.date ?? "?"}: Revenue ${fmtB(inc.revenue ?? null)} | Net Income ${fmtB(inc.netIncome ?? null)} | Op. Margin ${margin}`
+      );
+    }
   }
-  lines.push("\n--- Momentum ---");
-  if (mom) {
-    lines.push(`12M: ${((mom.momentum12M - 1) * 100).toFixed(1)}% (${mom.signal})`);
-    lines.push(`6M: ${((mom.momentum6M - 1) * 100).toFixed(1)}%`);
-    lines.push(`3M: ${((mom.momentum3M - 1) * 100).toFixed(1)}%`);
-    lines.push(`1M: ${((mom.momentum1M - 1) * 100).toFixed(1)}%`);
+
+  if (balanceSheets.length > 0) {
+    const bs = balanceSheets[0];
+    lines.push("\n=== BALANCE SHEET (most recent) ===");
+    lines.push(`Total Assets: ${fmtB(bs.totalAssets ?? null)} | Equity: ${fmtB(bs.totalStockholdersEquity ?? null)} | Debt: ${fmtB(bs.totalDebt ?? null)}`);
+    if (bs.cashAndCashEquivalents != null) lines.push(`Cash: ${fmtB(bs.cashAndCashEquivalents)}`);
+    const dte =
+      bs.totalStockholdersEquity && bs.totalStockholdersEquity > 0 && bs.totalDebt != null
+        ? (bs.totalDebt / bs.totalStockholdersEquity).toFixed(2)
+        : "N/A";
+    lines.push(`Debt/Equity: ${dte}`);
   }
-  lines.push("\n--- Risk / Volatility ---");
-  if (vol) {
-    lines.push(`Annualised Vol: ${(vol.annualizedVolatility * 100).toFixed(1)}% (${vol.riskLevel})`);
-    lines.push(`30D Vol: ${(vol.volatility30D * 100).toFixed(1)}%`);
-    lines.push(`Sharpe Ratio: ${vol.sharpeRatio.toFixed(2)}`);
+
+  const latestMetric = metricsArr[0] ?? null;
+  const latestRatio = ratiosArr[0] ?? null;
+  if (latestMetric || latestRatio) {
+    lines.push("\n=== VALUATION & QUALITY RATIOS ===");
+    const pe = latestMetric?.peRatio ?? latestRatio?.priceEarningsRatio;
+    const pb = latestMetric?.priceToBookRatio ?? latestRatio?.priceToBookRatio;
+    const roe = latestMetric?.roe ?? latestRatio?.returnOnEquity;
+    const ey = latestMetric?.earningsYield;
+    const dy = latestMetric?.dividendYield ?? latestRatio?.dividendYield;
+    const dte2 = latestMetric?.debtToEquity;
+
+    if (pe != null) lines.push(`P/E: ${fmtNum(pe, 1)}`);
+    if (pb != null) lines.push(`P/B: ${fmtNum(pb, 2)}`);
+    if (roe != null) lines.push(`ROE: ${fmtPct(roe)}`);
+    if (ey != null) lines.push(`Earnings Yield: ${fmtPct(ey)}`);
+    if (dy != null) lines.push(`Dividend Yield: ${fmtPct(dy)}`);
+    if (dte2 != null) lines.push(`Debt/Equity: ${fmtNum(dte2, 2)}`);
+    if (latestRatio?.netProfitMargin != null) lines.push(`Net Profit Margin: ${fmtPct(latestRatio.netProfitMargin)}`);
+    if (latestRatio?.operatingProfitMargin != null) lines.push(`Operating Margin: ${fmtPct(latestRatio.operatingProfitMargin)}`);
   }
-  lines.push("\n--- Value / Fundamentals ---");
-  if (val) {
-    if (val.bookToMarket !== undefined) lines.push(`Book-to-Market: ${val.bookToMarket.toFixed(3)} (${val.valueSignal})`);
-    if (val.peRatio !== undefined) lines.push(`P/E: ${val.peRatio.toFixed(1)}`);
-    if (val.pbRatio !== undefined) lines.push(`P/B: ${val.pbRatio.toFixed(2)}`);
-    if (val.roe !== undefined) lines.push(`ROE: ${(val.roe * 100).toFixed(1)}%`);
-    if (val.debtToEquity !== undefined) lines.push(`Debt/Equity: ${val.debtToEquity.toFixed(2)}`);
-  }
-  lines.push(`\nBase Quant Score (default weights): ${baseScore.toFixed(1)}/100`);
+
   return lines.join("\n");
 }
 
 // ─── Claude call ──────────────────────────────────────────────────────────────
 
 async function callClaude(
-  prompt: string,
+  researchPrompt: string,
   claudeKey: string
 ): Promise<Omit<ClaudeAnalysis, "aiAdjustedScore">> {
-  const systemPrompt = `You are a quantitative finance model selector. Your ONLY job is to analyze the provided stock metrics and recommend the optimal formula parameters for the quant engine. You do NOT make price predictions, issue buy/sell ratings, or calculate any numbers — the quant engine does all calculations.
+  const systemPrompt = `You are a quantitative research analyst. Your workflow is:
+1. READ the provided raw company data carefully and RESEARCH the stock's current state.
+2. RECOMMEND which quantitative formula family best fits this specific company.
+3. NEVER calculate any numbers yourself — the quant engine handles all calculations.
 
-Choose:
-1. Which factor model best fits this stock: CAPM, FF3, FF5, or APT
-2. Optimal score weights for this stock's profile (must sum to 1.0)
-3. Relative importance of each Fama-French factor (0–1 scale)
-4. Which risk metric should dominate: CVaR, VaR, Sharpe, or GARCH
-5. A concise plain-English rationale (2–3 sentences) explaining your choices
+Research considerations:
+- Is the company momentum-driven (strong recent returns) or mean-reverting?
+- Does the sector reward value (high B/M, low P/E) or growth (high P/E, strong revenue growth)?
+- Is profitability (ROE, margins — RMW factor) or capital investment behavior (CMA factor) more relevant?
+- For large-cap stable companies: CAPM (single factor) may suffice.
+- For size/value tilts: use FF3.
+- When profitability or investment aggressiveness drives returns: use FF5.
+- For sector-driven, macro-sensitive, or complex multi-driver stocks: use APT.
+- For tail risk: use CVaR or GARCH if volatile or leveraged; Sharpe for stable quality stocks.
+
+Formula reference from quantitative finance research:
+- CAPM: E[R] = Rf + β*(Rm-Rf) — best for large, stable, low-idiosyncratic-risk companies
+- FF3: adds SMB (size) and HML (value) factors — for clear size or value tilts
+- FF5: adds RMW (profitability) and CMA (investment conservatism) — when quality/capital allocation matters
+- APT: multi-factor with sector/macro premia — for complex, rate-sensitive, or commodity-driven stocks
 
 You MUST respond with ONLY valid JSON — no markdown fences, no text outside the JSON.
-Required structure:
+Required JSON structure:
 {
   "selected_formula": "CAPM" | "FF3" | "FF5" | "APT",
   "recommended_formula": "descriptive name, e.g. Quality-Growth FF5",
   "score_weights": {
-    "momentum": 0.0–1.0,
-    "value": 0.0–1.0,
-    "quality": 0.0–1.0,
-    "size": 0.0–1.0,
-    "volatility": 0.0–1.0
+    "momentum": <0.0–1.0>,
+    "value": <0.0–1.0>,
+    "quality": <0.0–1.0>,
+    "size": <0.0–1.0>,
+    "volatility": <0.0–1.0>
   },
   "ff_factor_emphasis": {
-    "market": 0.0–1.0,
-    "smb": 0.0–1.0,
-    "hml": 0.0–1.0,
-    "rmw": 0.0–1.0,
-    "cma": 0.0–1.0
+    "market": <0.0–1.0>,
+    "smb": <0.0–1.0>,
+    "hml": <0.0–1.0>,
+    "rmw": <0.0–1.0>,
+    "cma": <0.0–1.0>
   },
   "risk_metric": "CVaR" | "VaR" | "Sharpe" | "GARCH",
-  "rationale": "2–3 sentence explanation"
+  "research_summary": "3-4 sentences describing the company's current state: recent performance trends, earnings/margin trajectory, leverage posture, and why these factors led to your formula recommendation.",
+  "rationale": "1-2 sentence summary of the formula recommendation"
 }`;
 
   const body = {
     model: "claude-haiku-4-5-20251001",
-    max_tokens: 800,
+    max_tokens: 1200,
     system: systemPrompt,
-    messages: [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content: researchPrompt }],
   };
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -245,7 +303,16 @@ Required structure:
     },
     riskMetric: validRiskMetrics.includes(raw.risk_metric) ? raw.risk_metric : "CVaR",
     rationale: raw.rationale ?? "",
+    researchSummary: raw.research_summary ?? "",
   };
+}
+
+// ─── SSE helper ───────────────────────────────────────────────────────────────
+
+const encoder = new TextEncoder();
+
+function sseEvent(controller: ReadableStreamDefaultController, event: ProgressEvent) {
+  controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -261,146 +328,201 @@ export async function POST(req: NextRequest) {
   if (!polygonKey) return NextResponse.json({ error: "Polygon API key required" }, { status: 400 });
   if (!fmpKey) return NextResponse.json({ error: "FMP API key required" }, { status: 400 });
 
-  try {
-    const to = dateOffset(0);
-    const from730 = dateOffset(730);
-    const from2y = dateOffset(750);
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: ProgressEvent) => sseEvent(controller, event);
 
-    // Fetch all price data in parallel
-    const [stockBars, spyBars, iwmBars, iveBars, ivwBars] = await Promise.all([
-      fetchPolygonBars(ticker, from730, to, polygonKey),
-      fetchPolygonBars("SPY", from2y, to, polygonKey),
-      fetchPolygonBars("IWM", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
-      fetchPolygonBars("IVE", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
-      fetchPolygonBars("IVW", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
-    ]);
-
-    const stockReturns: DailyReturn[] = computeReturnsFromPrices(stockBars);
-    const marketReturns: DailyReturn[] = computeReturnsFromPrices(spyBars);
-
-    // SMB proxy: IWM - SPY
-    let smbReturns: DailyReturn[] | null = null;
-    if (iwmBars) {
-      const iwmRets = computeReturnsFromPrices(iwmBars);
-      const spyMap: Record<string, number> = {};
-      for (const r of marketReturns) spyMap[r.date] = r.returnValue;
-      smbReturns = iwmRets
-        .filter((r) => r.date in spyMap)
-        .map((r) => ({ date: r.date, returnValue: r.returnValue - spyMap[r.date] }));
-    }
-
-    // HML proxy: IVE - IVW
-    let hmlReturns: DailyReturn[] | null = null;
-    if (iveBars && ivwBars) {
-      const iveRets = computeReturnsFromPrices(iveBars);
-      const ivwMap: Record<string, number> = {};
-      for (const r of computeReturnsFromPrices(ivwBars)) ivwMap[r.date] = r.returnValue;
-      hmlReturns = iveRets
-        .filter((r) => r.date in ivwMap)
-        .map((r) => ({ date: r.date, returnValue: r.returnValue - ivwMap[r.date] }));
-    }
-
-    // FMP data in parallel
-    const [profileArr, metricsArr, ratiosArr, incomeArr, balanceArr] = await Promise.all([
-      fmpGet<FMPProfile[]>(`/profile/${ticker}`, fmpKey).catch(() => [] as FMPProfile[]),
-      fmpGet<FMPKeyMetrics[]>(`/key-metrics/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPKeyMetrics[]),
-      fmpGet<FMPRatios[]>(`/ratios/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPRatios[]),
-      fmpGet<FMPIncomeStatement[]>(`/income-statement/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPIncomeStatement[]),
-      fmpGet<FMPBalanceSheet[]>(`/balance-sheet-statement/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPBalanceSheet[]),
-    ]);
-
-    const profile: FMPProfile | null = profileArr[0] ?? null;
-    const latestMetric: FMPKeyMetrics | null = metricsArr[0] ?? null;
-    const latestRatio: FMPRatios | null = ratiosArr[0] ?? null;
-
-    const pbRaw = latestMetric?.priceToBookRatio ?? latestRatio?.priceToBookRatio;
-    const bookToMarket = pbRaw && pbRaw > 0 ? 1 / pbRaw : undefined;
-
-    let valueSignal = "N/A";
-    if (bookToMarket !== undefined) {
-      if (bookToMarket > 0.8) valueSignal = "Deep Value";
-      else if (bookToMarket > 0.4) valueSignal = "Value";
-      else if (bookToMarket > 0.2) valueSignal = "Blend";
-      else valueSignal = "Growth";
-    }
-
-    const valueMetrics: ValueMetrics = {
-      bookToMarket,
-      peRatio: latestMetric?.peRatio ?? latestRatio?.priceEarningsRatio,
-      pbRatio: pbRaw,
-      roe: latestMetric?.roe ?? latestRatio?.returnOnEquity,
-      debtToEquity: latestMetric?.debtToEquity,
-      earningsYield: latestMetric?.earningsYield,
-      dividendYield: latestMetric?.dividendYield ?? latestRatio?.dividendYield,
-      valueSignal,
-    };
-
-    // Quant calculations
-    const famaFrench = computeFamaFrenchFiveFactor(
-      stockReturns,
-      marketReturns,
-      smbReturns,
-      hmlReturns,
-      valueMetrics,
-      incomeArr,
-      balanceArr,
-      ticker
-    );
-    const momentum = computeMomentum(stockBars);
-    const volatility = computeVolatility(stockBars);
-    const riskMetrics = computeRiskMetrics(stockBars);
-
-    // Base quant score with default 30/25/20/15/10 weights
-    const quantScore = computeQuantScore({ momentum, valueMetrics, famaFrench, volatility });
-
-    // Kelly Criterion — use FF5 expected excess return and annualised variance
-    const kelly = (() => {
-      if (!famaFrench || !volatility) return undefined;
-      const expectedReturn = famaFrench.expectedExcessReturn + ANNUAL_RISK_FREE_RATE;
-      const annualVol = volatility.annualizedVolatility;
-      return computeKelly(expectedReturn, annualVol * annualVol);
-    })();
-
-    // Claude analysis (optional) — formula selector only
-    let claudeAnalysis: ClaudeAnalysis | undefined;
-    let claudeError: string | undefined;
-    if (claudeKey) {
       try {
-        const prompt = buildClaudePrompt(ticker, profile, famaFrench, momentum, volatility, valueMetrics, quantScore);
-        const partial = await callClaude(prompt, claudeKey);
-        // Engine recalculates score using Claude's recommended weights
-        const aiAdjustedScore = computeQuantScore(
-          { momentum, valueMetrics, famaFrench, volatility },
-          partial.scoreWeights
+        // ── Stage 1: Fetch all data ──────────────────────────────────────────
+        send({ stage: "fetching", message: "Fetching Stock Data..." });
+
+        const to = dateOffset(0);
+        const from730 = dateOffset(730);
+        const from2y = dateOffset(750);
+
+        const [stockBars, spyBars, iwmBars, iveBars, ivwBars] = await Promise.all([
+          fetchPolygonBars(ticker, from730, to, polygonKey),
+          fetchPolygonBars("SPY", from2y, to, polygonKey),
+          fetchPolygonBars("IWM", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
+          fetchPolygonBars("IVE", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
+          fetchPolygonBars("IVW", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
+        ]);
+
+        const [profileArr, metricsArr, ratiosArr, incomeArr, balanceArr] = await Promise.all([
+          fmpGet<FMPProfile[]>(`/profile/${ticker}`, fmpKey).catch(() => [] as FMPProfile[]),
+          fmpGet<FMPKeyMetrics[]>(`/key-metrics/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPKeyMetrics[]),
+          fmpGet<FMPRatios[]>(`/ratios/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPRatios[]),
+          fmpGet<FMPIncomeStatement[]>(`/income-statement/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPIncomeStatement[]),
+          fmpGet<FMPBalanceSheet[]>(`/balance-sheet-statement/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPBalanceSheet[]),
+        ]);
+
+        const profile: FMPProfile | null = profileArr[0] ?? null;
+        const latestMetric: FMPKeyMetrics | null = metricsArr[0] ?? null;
+        const latestRatio: FMPRatios | null = ratiosArr[0] ?? null;
+
+        // Compute simple returns for Claude prompt using raw price array
+        const sortedBars = [...stockBars].sort(
+          (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
         );
-        claudeAnalysis = { ...partial, aiAdjustedScore };
+        const latestPrice = sortedBars[sortedBars.length - 1]?.price ?? 0;
+        const price3MAgo = sortedBars[Math.max(0, sortedBars.length - 63)]?.price ?? latestPrice;
+        const price12MAgo = sortedBars[Math.max(0, sortedBars.length - 252)]?.price ?? latestPrice;
+        const return3M = price3MAgo > 0 ? latestPrice / price3MAgo - 1 : 0;
+        const return12M = price12MAgo > 0 ? latestPrice / price12MAgo - 1 : 0;
+
+        // ── Stage 2: Claude Researching ──────────────────────────────────────
+        let claudeAnalysis: ClaudeAnalysis | undefined;
+        let claudeError: string | undefined;
+
+        if (claudeKey) {
+          send({ stage: "researching", message: "Claude Researching..." });
+
+          try {
+            const researchPrompt = buildClaudeResearchPrompt(
+              ticker,
+              profile,
+              incomeArr,
+              balanceArr,
+              metricsArr,
+              ratiosArr,
+              return3M,
+              return12M
+            );
+
+            const partial = await callClaude(researchPrompt, claudeKey);
+
+            // ── Stage 3: Selecting formula ───────────────────────────────────
+            send({ stage: "selecting", message: "Selecting Best Formula..." });
+
+            // Store partial so the calculator can use it
+            claudeAnalysis = { ...partial, aiAdjustedScore: 0 }; // score filled in after calc
+          } catch (err) {
+            claudeError = err instanceof Error ? err.message : "Claude analysis failed";
+            console.error("[Claude]", claudeError);
+          }
+        }
+
+        // ── Stage 4: Calculating ─────────────────────────────────────────────
+        send({ stage: "calculating", message: "Calculating..." });
+
+        const stockReturns: DailyReturn[] = computeReturnsFromPrices(stockBars);
+        const marketReturns: DailyReturn[] = computeReturnsFromPrices(spyBars);
+
+        // SMB proxy: IWM - SPY
+        let smbReturns: DailyReturn[] | null = null;
+        if (iwmBars) {
+          const iwmRets = computeReturnsFromPrices(iwmBars);
+          const spyMap: Record<string, number> = {};
+          for (const r of marketReturns) spyMap[r.date] = r.returnValue;
+          smbReturns = iwmRets
+            .filter((r) => r.date in spyMap)
+            .map((r) => ({ date: r.date, returnValue: r.returnValue - spyMap[r.date] }));
+        }
+
+        // HML proxy: IVE - IVW
+        let hmlReturns: DailyReturn[] | null = null;
+        if (iveBars && ivwBars) {
+          const iveRets = computeReturnsFromPrices(iveBars);
+          const ivwMap: Record<string, number> = {};
+          for (const r of computeReturnsFromPrices(ivwBars)) ivwMap[r.date] = r.returnValue;
+          hmlReturns = iveRets
+            .filter((r) => r.date in ivwMap)
+            .map((r) => ({ date: r.date, returnValue: r.returnValue - ivwMap[r.date] }));
+        }
+
+        const pbRaw = latestMetric?.priceToBookRatio ?? latestRatio?.priceToBookRatio;
+        const bookToMarket = pbRaw && pbRaw > 0 ? 1 / pbRaw : undefined;
+
+        let valueSignal = "N/A";
+        if (bookToMarket !== undefined) {
+          if (bookToMarket > 0.8) valueSignal = "Deep Value";
+          else if (bookToMarket > 0.4) valueSignal = "Value";
+          else if (bookToMarket > 0.2) valueSignal = "Blend";
+          else valueSignal = "Growth";
+        }
+
+        const valueMetrics: ValueMetrics = {
+          bookToMarket,
+          peRatio: latestMetric?.peRatio ?? latestRatio?.priceEarningsRatio,
+          pbRatio: pbRaw,
+          roe: latestMetric?.roe ?? latestRatio?.returnOnEquity,
+          debtToEquity: latestMetric?.debtToEquity,
+          earningsYield: latestMetric?.earningsYield,
+          dividendYield: latestMetric?.dividendYield ?? latestRatio?.dividendYield,
+          valueSignal,
+        };
+
+        const famaFrench = computeFamaFrenchFiveFactor(
+          stockReturns,
+          marketReturns,
+          smbReturns,
+          hmlReturns,
+          valueMetrics,
+          incomeArr,
+          balanceArr,
+          ticker
+        );
+        const momentum = computeMomentum(stockBars);
+        const volatility = computeVolatility(stockBars);
+        const riskMetrics = computeRiskMetrics(stockBars);
+
+        // Base quant score with default 30/25/20/15/10 weights
+        const quantScore = computeQuantScore({ momentum, valueMetrics, famaFrench, volatility });
+
+        // Kelly Criterion
+        const kelly = (() => {
+          if (!famaFrench || !volatility) return undefined;
+          const expectedReturn = famaFrench.expectedExcessReturn + ANNUAL_RISK_FREE_RATE;
+          const annualVol = volatility.annualizedVolatility;
+          return computeKelly(expectedReturn, annualVol * annualVol);
+        })();
+
+        // Recalculate score with Claude's recommended weights (engine does all calculations)
+        if (claudeAnalysis) {
+          const aiAdjustedScore = computeQuantScore(
+            { momentum, valueMetrics, famaFrench, volatility },
+            claudeAnalysis.scoreWeights
+          );
+          claudeAnalysis = { ...claudeAnalysis, aiAdjustedScore };
+        }
+
+        // ── Stage 5: Generating Report ───────────────────────────────────────
+        send({ stage: "reporting", message: "Generating Report..." });
+
+        const analysis: QuantAnalysis = {
+          id: crypto.randomUUID(),
+          ticker,
+          profile: profile ?? undefined,
+          analyzedAt: new Date().toISOString(),
+          famaFrench: famaFrench ?? undefined,
+          momentum: momentum ?? undefined,
+          volatility: volatility ?? undefined,
+          valueMetrics,
+          riskMetrics: riskMetrics ?? undefined,
+          kelly,
+          priceHistory: stockBars,
+          claudeAnalysis,
+          claudeError,
+          quantScore,
+          quantScoreLabel: quantScoreLabel(quantScore),
+        };
+
+        // ── Stage 6: Complete ────────────────────────────────────────────────
+        send({ stage: "complete", message: "Done", result: analysis });
       } catch (err) {
-        claudeError = err instanceof Error ? err.message : "Claude analysis failed";
-        console.error("[Claude]", claudeError);
+        const msg = err instanceof Error ? err.message : "Analysis failed";
+        send({ stage: "error", message: msg, error: msg });
+      } finally {
+        controller.close();
       }
-    }
+    },
+  });
 
-    const analysis: QuantAnalysis = {
-      id: crypto.randomUUID(),
-      ticker,
-      profile: profile ?? undefined,
-      analyzedAt: new Date().toISOString(),
-      famaFrench: famaFrench ?? undefined,
-      momentum: momentum ?? undefined,
-      volatility: volatility ?? undefined,
-      valueMetrics,
-      riskMetrics: riskMetrics ?? undefined,
-      kelly,
-      priceHistory: stockBars,
-      claudeAnalysis,
-      claudeError,
-      quantScore,
-      quantScoreLabel: quantScoreLabel(quantScore),
-    };
-
-    return NextResponse.json(analysis);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Analysis failed";
-    return NextResponse.json({ error: msg }, { status: 500 });
-  }
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    },
+  });
 }

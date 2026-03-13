@@ -1,9 +1,17 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { Search, Loader2, AlertCircle, X } from "lucide-react";
-import type { StockSearchResult, QuantAnalysis } from "@/lib/types";
+import type { StockSearchResult, QuantAnalysis, ProgressEvent } from "@/lib/types";
 import { useApp } from "@/lib/context";
 import StockDetail from "./StockDetail";
+
+const STAGES = [
+  "Fetching Stock Data...",
+  "Claude Researching...",
+  "Selecting Best Formula...",
+  "Calculating...",
+  "Generating Report...",
+];
 
 export default function StockSearch() {
   const { apiKeys, setCurrentAnalysis, currentAnalysis, setActiveTab, envKeysSet } = useApp();
@@ -11,6 +19,7 @@ export default function StockSearch() {
   const [suggestions, setSuggestions] = useState<StockSearchResult[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [loadingStage, setLoadingStage] = useState("Fetching Stock Data...");
   const [error, setError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -71,7 +80,9 @@ export default function StockSearch() {
     setQuery(ticker);
     setError("");
     setAnalyzing(true);
+    setLoadingStage("Fetching Stock Data...");
     setCurrentAnalysis(null);
+
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
@@ -83,15 +94,68 @@ export default function StockSearch() {
           claudeKey: apiKeys.claude || undefined,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
+
+      if (!res.ok || !res.body) {
+        // Non-streaming error (e.g. 400 for missing ticker/keys)
+        const data = await res.json().catch(() => ({ error: "Analysis failed" }));
         setError(data.error ?? "Analysis failed");
+        setAnalyzing(false);
         return;
       }
-      setCurrentAnalysis(data as QuantAnalysis);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        // SSE events are separated by double newlines
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const chunk of parts) {
+          const line = chunk.replace(/^data: /, "").trim();
+          if (!line) continue;
+
+          let event: ProgressEvent;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+
+          switch (event.stage) {
+            case "fetching":
+              setLoadingStage("Fetching Stock Data...");
+              break;
+            case "researching":
+              setLoadingStage("Claude Researching...");
+              break;
+            case "selecting":
+              setLoadingStage("Selecting Best Formula...");
+              break;
+            case "calculating":
+              setLoadingStage("Calculating...");
+              break;
+            case "reporting":
+              setLoadingStage("Generating Report...");
+              break;
+            case "complete":
+              if (event.result) setCurrentAnalysis(event.result as QuantAnalysis);
+              setAnalyzing(false);
+              break;
+            case "error":
+              setError(event.error ?? "Analysis failed");
+              setAnalyzing(false);
+              break;
+          }
+        }
+      }
     } catch {
       setError("Network error. Please try again.");
-    } finally {
       setAnalyzing(false);
     }
   }
@@ -185,9 +249,30 @@ export default function StockSearch() {
 
         {analyzing && (
           <div className="flex flex-col items-center justify-center py-20 text-center px-4">
-            <Loader2 size={36} className="animate-spin text-blue-400 mb-4" />
-            <p className="text-gray-300 font-medium">Running quantitative analysis...</p>
-            <p className="text-gray-500 text-sm mt-2">Fetching price history, computing Fama-French factors & more</p>
+            <Loader2 size={36} className="animate-spin text-blue-400 mb-5" />
+            <p className="text-white font-semibold text-base mb-1">{loadingStage}</p>
+            <p className="text-gray-500 text-xs mb-6">
+              {loadingStage === "Fetching Stock Data..." && "Pulling price history & fundamentals..."}
+              {loadingStage === "Claude Researching..." && "Analyzing company profile, earnings & sector trends..."}
+              {loadingStage === "Selecting Best Formula..." && "Identifying the optimal quantitative model..."}
+              {loadingStage === "Calculating..." && "Running Fama-French, VaR, GARCH, Kelly & more..."}
+              {loadingStage === "Generating Report..." && "Assembling your analysis report..."}
+            </p>
+            {/* Stage progress dots */}
+            <div className="flex items-center gap-2">
+              {STAGES.map((stage) => (
+                <div
+                  key={stage}
+                  className={`h-1.5 rounded-full transition-all duration-300 ${
+                    stage === loadingStage
+                      ? "w-6 bg-blue-400"
+                      : STAGES.indexOf(stage) < STAGES.indexOf(loadingStage)
+                      ? "w-3 bg-blue-600"
+                      : "w-3 bg-gray-700"
+                  }`}
+                />
+              ))}
+            </div>
           </div>
         )}
 

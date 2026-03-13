@@ -190,15 +190,34 @@ export interface KellyResult {
   variance: number;
 }
 
+// ─── SSE Progress Events ──────────────────────────────────────────────────────
+
+export type ProgressStage =
+  | "fetching"     // Fetching Stock Data...
+  | "researching"  // Claude Researching...
+  | "selecting"    // Selecting Best Formula...
+  | "calculating"  // Calculating...
+  | "reporting"    // Generating Report...
+  | "complete"     // Final payload event
+  | "error";       // Error event
+
+export interface ProgressEvent {
+  stage: ProgressStage;
+  message: string;
+  /** Only present on the "complete" event */
+  result?: QuantAnalysis;
+  /** Only present on the "error" event */
+  error?: string;
+}
+
 // ─── Claude / AI ──────────────────────────────────────────────────────────────
 
 export type FormulaSet = "CAPM" | "FF3" | "FF5" | "APT";
 export type RiskMetricChoice = "CVaR" | "VaR" | "Sharpe" | "GARCH";
 
 /**
- * Claude's ONLY job is formula selection — it tells the quant engine
- * WHICH formula and weights to use.  It does NOT make predictions,
- * issue ratings, or calculate any numbers itself.
+ * Claude's ONLY job is to research the stock and select the best formula.
+ * It does NOT make predictions, issue buy/sell ratings, or calculate numbers.
  */
 export interface ClaudeAnalysis {
   /** Primary factor model Claude recommends for this stock */
@@ -227,6 +246,8 @@ export interface ClaudeAnalysis {
   rationale: string;
   /** Score recalculated by the engine using Claude's recommended weights */
   aiAdjustedScore: number;
+  /** Claude's narrative research summary of the company's current state */
+  researchSummary?: string;
 }
 
 // ─── Master Analysis ──────────────────────────────────────────────────────────
