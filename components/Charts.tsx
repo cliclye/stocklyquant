@@ -36,7 +36,7 @@ export function PriceChart({ data }: PriceChartProps) {
   const pad = (max - min) * 0.05;
 
   return (
-    <ResponsiveContainer width="100%" height={220}>
+    <ResponsiveContainer width="100%" height={260}>
       <LineChart data={display} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
         <XAxis
@@ -340,7 +340,7 @@ export function QuantPredictionChart({ path }: QuantPredictionChartProps) {
   return (
     <div className="space-y-6">
       {/* Dashboard Header */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-2 gap-4">
         <div className="bg-surface/40 border border-border rounded-2xl p-5 backdrop-blur-sm">
           <div className="flex items-center justify-between mb-4">
             <h4 className="text-sm font-medium text-text-secondary">30-Day Quant Forecast</h4>
@@ -375,8 +375,8 @@ export function QuantPredictionChart({ path }: QuantPredictionChartProps) {
 
       {/* Chart Section */}
       <div className="bg-surface/20 border border-border/30 rounded-2xl p-4">
-        <ResponsiveContainer width="100%" height={280}>
-          <ComposedChart data={path.points} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+        <ResponsiveContainer width="100%" height={300}>
+          <ComposedChart data={path.points} margin={{ top: 10, right: 16, left: 4, bottom: 0 }}>
             <defs>
               <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
                 <stop offset="0%" stopColor="#22d3ee" stopOpacity={0.8} />
@@ -421,7 +421,7 @@ export function QuantPredictionChart({ path }: QuantPredictionChartProps) {
             <Line
               type="monotone"
               dataKey="quant"
-              stroke="url(#lineGrad)"
+              stroke="#22d3ee"
               strokeWidth={3}
               dot={false}
               name="quant"

@@ -245,17 +245,17 @@ export default function StockDetail({ analysis }: Props) {
       </div>
 
       {/* ─── Main Charts Grid ─────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
         {/* Main Price Chart */}
-        <div className="xl:col-span-8 glass-panel rounded-[2rem] p-8 shadow-2xl">
+        <div className="glass-panel rounded-[2rem] p-8 shadow-2xl">
           <SectionHeader icon={BarChart2} label="Price Action (1Y)" sub="Historical Trend" />
-          <div className="h-[300px] w-full mt-4">
+          <div className="w-full mt-4">
             <PriceChart data={analysis.priceHistory} />
           </div>
         </div>
 
         {/* Prediction / Quant Chart */}
-        <div className="xl:col-span-4 flex flex-col gap-8">
+        <div className="flex flex-col gap-8">
           {/* Prioritize Quant Path if available, else GBM */}
           {analysis.quantPricePath ? (
             <div className="glass-panel rounded-[2rem] p-8 flex-1 shadow-2xl">

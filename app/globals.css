@@ -3,59 +3,59 @@
 @tailwind utilities;
 
 :root {
-  /* Modern Fintech Dark Theme - Refined Zinc */
-  --background: #09090b; 
-  --surface: #121214; 
-  --surface-highlight: #1c1c1f;
-  --border: rgba(255, 255, 255, 0.08);
-  
-  --primary: #06b6d4; /* Cyan 500 */
-  --secondary: #8b5cf6; /* Violet 500 */
-  
-  --success: #10b981; /* Emerald 500 */
-  --danger: #f43f5e; /* Rose 500 */
-  --warning: #f59e0b; /* Amber 500 */
-  
-  --text-primary: #f4f4f5; 
-  --text-secondary: #a1a1aa; 
+  /* Bare RGB channels — required for Tailwind's /opacity modifier syntax (bg-primary/10 etc.) */
+  --background: 9 9 11;           /* #09090b */
+  --surface: 18 18 20;            /* #121214 */
+  --surface-highlight: 28 28 31;  /* #1c1c1f */
+  --border: 255 255 255;          /* white base; use /opacity in classes */
+
+  --primary: 6 182 212;           /* cyan-500  #06b6d4 */
+  --secondary: 139 92 246;        /* violet-500 #8b5cf6 */
+
+  --success: 16 185 129;          /* emerald-500 #10b981 */
+  --danger: 244 63 94;            /* rose-500   #f43f5e */
+  --warning: 245 158 11;          /* amber-500  #f59e0b */
+
+  --text-primary: 244 244 245;    /* zinc-100 #f4f4f5 */
+  --text-secondary: 161 161 170;  /* zinc-400 #a1a1aa */
 }
 
 body {
-  background-color: var(--background);
-  color: var(--text-primary);
+  background-color: rgb(var(--background));
+  color: rgb(var(--text-primary));
   font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
-  overflow: hidden; 
+  overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
 /* Glassmorphism & Surface Utilities */
 @layer utilities {
   .glass-panel {
-    background: rgba(18, 18, 20, 0.7);
+    background: rgb(var(--surface) / 0.7);
     backdrop-filter: blur(12px);
-    border: 1px solid var(--border);
+    border: 1px solid rgb(var(--border) / 0.08);
     box-shadow: 0 4px 24px -1px rgba(0, 0, 0, 0.2);
   }
-  
+
   .glass-input {
-    background: rgba(28, 28, 31, 0.5);
-    border: 1px solid var(--border);
+    background: rgb(var(--surface-highlight) / 0.5);
+    border: 1px solid rgb(var(--border) / 0.08);
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     outline: none;
   }
-  
+
   .glass-input:focus {
-    border-color: rgba(6, 182, 212, 0.4);
-    background: rgba(28, 28, 31, 0.7);
-    box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.1);
+    border-color: rgb(var(--primary) / 0.4);
+    background: rgb(var(--surface-highlight) / 0.7);
+    box-shadow: 0 0 0 2px rgb(var(--primary) / 0.1);
   }
 
   .surface-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--border) / 0.08);
     border-radius: 1.5rem;
   }
-  
+
   .text-gradient-primary {
     @apply bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-500;
   }

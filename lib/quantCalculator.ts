@@ -228,7 +228,9 @@ export function computeFormulaResult(
   balanceSheets: FMPBalanceSheet[],
   riskMetrics: RiskMetrics | null,
   volatility: VolatilityResult | null,
-  ticker: string
+  ticker: string,
+  ffFactorEmphasis?: { market: number; smb: number; hml: number; rmw: number; cma: number },
+  macroReturns?: { oil: DailyReturn[] | null; rates: DailyReturn[] | null; vix: DailyReturn[] | null; gold: DailyReturn[] | null }
 ): FamaFrenchResult | null {
   const ff5 = computeFamaFrenchFiveFactor(
     stockReturns,
@@ -242,26 +244,65 @@ export function computeFormulaResult(
   );
   if (!ff5) return null;
 
+  // Clamp each emphasis value to [0,1]; fall back to 1 (no scaling) when absent.
+  const em = (e: number | undefined) => Math.min(Math.max(e ?? 1, 0), 1);
+  const fe = ffFactorEmphasis;
+
   let expectedReturn = ff5.expectedExcessReturn;
 
   switch (type) {
     case "CAPM":
-      expectedReturn = ff5.betas.marketBeta * MARKET_PREMIUM;
+      expectedReturn = fe
+        ? ff5.betas.alpha + ff5.betas.marketBeta * MARKET_PREMIUM * em(fe.market)
+        : ff5.betas.marketBeta * MARKET_PREMIUM;
       break;
     case "FF3":
-      expectedReturn =
-        ff5.betas.marketBeta * MARKET_PREMIUM +
-        ff5.betas.smbBeta * SMB_PREMIUM +
-        ff5.betas.hmlBeta * HML_PREMIUM;
+      expectedReturn = fe
+        ? ff5.betas.alpha +
+          ff5.betas.marketBeta * MARKET_PREMIUM * em(fe.market) +
+          ff5.betas.smbBeta   * SMB_PREMIUM     * em(fe.smb) +
+          ff5.betas.hmlBeta   * HML_PREMIUM     * em(fe.hml)
+        : ff5.betas.marketBeta * MARKET_PREMIUM +
+          ff5.betas.smbBeta   * SMB_PREMIUM +
+          ff5.betas.hmlBeta   * HML_PREMIUM;
       break;
     case "FF5":
-      // Already calculated
+      if (fe) {
+        expectedReturn =
+          ff5.betas.alpha +
+          ff5.betas.marketBeta * MARKET_PREMIUM * em(fe.market) +
+          ff5.betas.smbBeta   * SMB_PREMIUM     * em(fe.smb) +
+          ff5.betas.hmlBeta   * HML_PREMIUM     * em(fe.hml) +
+          ff5.rmwBeta         * RMW_PREMIUM     * em(fe.rmw) +
+          ff5.cmaBeta         * CMA_PREMIUM     * em(fe.cma);
+      }
+      // else: ff5.expectedExcessReturn already has the correct value
       break;
-    case "APT":
-      // APT typically includes more macro factors.
-      // Here we use FF5 as a base and add a small macro-sensitivity alpha
-      expectedReturn = ff5.expectedExcessReturn + 0.01;
+    case "APT": {
+      // Arbitrage Pricing Theory (Ross 1976): E[R] = β_mkt·MktPrem + Σ(β_macro_i · λ_i)
+      // Annualised factor risk premiums: oil +4%, rates −2%, vol (VXX) −15%, gold +1%
+      const APT_PREMIUMS: Record<string, number> = {
+        oil: 0.04, rates: -0.02, vix: -0.15, gold: 0.01,
+      };
+      const macroAssets = [
+        { key: "oil",   returns: macroReturns?.oil },
+        { key: "rates", returns: macroReturns?.rates },
+        { key: "vix",   returns: macroReturns?.vix },
+        { key: "gold",  returns: macroReturns?.gold },
+      ];
+      let macroContrib = 0;
+      for (const asset of macroAssets) {
+        if (!asset.returns || asset.returns.length < 60) continue;
+        const { stock: sR, market: aR } = alignReturns(stockReturns, asset.returns);
+        if (sR.length < 30) continue;
+        const reg = olsFit(sR, [aR]);
+        if (reg && reg.coefficients.length > 1) {
+          macroContrib += reg.coefficients[1] * APT_PREMIUMS[asset.key];
+        }
+      }
+      expectedReturn = ff5.betas.marketBeta * MARKET_PREMIUM + macroContrib;
       break;
+    }
     case "SVJ": {
       // Stochastic Volatility + Jump
       // Estimate jump intensity from fat tails
@@ -734,7 +775,8 @@ export function computePricePrediction(
   famaFrench: FamaFrenchResult | null,
   volatility: VolatilityResult | null,
   riskMetrics: RiskMetrics | null,
-  forecastDays = 30
+  forecastDays = 30,
+  selectedFormula?: string
 ): PricePrediction | null {
   if (!volatility || priceHistory.length < 5) return null;
 
@@ -798,8 +840,8 @@ export function computePricePrediction(
     dailyVol,
     annualDrift,
     formulaUsed: riskMetrics
-      ? "GBM · FF5 drift · GARCH(1,1) vol"
-      : "GBM · FF5 drift · Historical vol",
+      ? `GBM · ${selectedFormula ?? "FF5"} drift · GARCH(1,1) vol`
+      : `GBM · ${selectedFormula ?? "FF5"} drift · Historical vol`,
   };
 }
 

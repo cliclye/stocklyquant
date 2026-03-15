@@ -14,7 +14,6 @@ import type {
   ProgressEvent,
 } from "@/lib/types";
 import {
-  computeFamaFrenchFiveFactor,
   computeMomentum,
   computeVolatility,
   computeQuantScore,
@@ -25,7 +24,6 @@ import {
   quantScoreLabel,
   computeReturnsFromPrices,
   computeFormulaResult,
-  alignReturns,
   ANNUAL_RISK_FREE_RATE,
 } from "@/lib/quantCalculator";
 
@@ -93,6 +91,27 @@ function fmtNum(v: number | undefined | null, decimals = 1) {
   return v.toFixed(decimals);
 }
 
+// ─── Pearson correlation between two DailyReturn series (date-aligned) ────────
+
+function pearsonCorr(a: DailyReturn[], b: DailyReturn[]): number | null {
+  const bMap: Record<string, number> = {};
+  for (const r of b) bMap[r.date.slice(0, 10)] = r.returnValue;
+  const xs: number[] = [], ys: number[] = [];
+  for (const r of a) {
+    const key = r.date.slice(0, 10);
+    if (key in bMap) { xs.push(r.returnValue); ys.push(bMap[key]); }
+  }
+  if (xs.length < 30) return null;
+  const meanX = xs.reduce((s, v) => s + v, 0) / xs.length;
+  const meanY = ys.reduce((s, v) => s + v, 0) / ys.length;
+  let num = 0, denX = 0, denY = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const dx = xs[i] - meanX, dy = ys[i] - meanY;
+    num += dx * dy; denX += dx * dx; denY += dy * dy;
+  }
+  return denX > 0 && denY > 0 ? num / Math.sqrt(denX * denY) : null;
+}
+
 // ─── Build Claude research prompt (raw company data, no pre-computed metrics) ─
 
 function buildClaudeResearchPrompt(
@@ -103,7 +122,8 @@ function buildClaudeResearchPrompt(
   metricsArr: FMPKeyMetrics[],
   ratiosArr: FMPRatios[],
   return3M: number,
-  return12M: number
+  return12M: number,
+  macroCors?: { oil: number | null; rates: number | null; vix: number | null; gold: number | null }
 ): string {
   const lines: string[] = [];
 
@@ -167,6 +187,16 @@ function buildClaudeResearchPrompt(
     if (dte2 != null) lines.push(`Debt/Equity: ${fmtNum(dte2, 2)}`);
     if (latestRatio?.netProfitMargin != null) lines.push(`Net Profit Margin: ${fmtPct(latestRatio.netProfitMargin)}`);
     if (latestRatio?.operatingProfitMargin != null) lines.push(`Operating Margin: ${fmtPct(latestRatio.operatingProfitMargin)}`);
+  }
+
+  if (macroCors) {
+    lines.push("\n=== MACRO CORRELATIONS (2-year Pearson r with daily returns) ===");
+    const fmtR = (v: number | null) => v != null ? v.toFixed(2) : "N/A";
+    lines.push(`Oil (USO):             ${fmtR(macroCors.oil)}`);
+    lines.push(`Interest Rates (TLT):  ${fmtR(macroCors.rates)}`);
+    lines.push(`Volatility (VXX):      ${fmtR(macroCors.vix)}`);
+    lines.push(`Gold (GLD):            ${fmtR(macroCors.gold)}`);
+    lines.push("Use these to assess macro sensitivity when selecting the formula (e.g. high rate or oil correlation → APT).");
   }
 
   return lines.join("\n");
@@ -357,7 +387,7 @@ export async function POST(req: NextRequest) {
 
         const to = dateOffset(0);
         const from730 = dateOffset(730);
-        const from2y = dateOffset(750);
+        const from2y = dateOffset(504); // ~2 trading years; sufficient for factor regressions
 
         const [stockBars, spyBars, iwmBars, iveBars, ivwBars, usoBars, tltBars, vxxBars, gldBars] = await Promise.all([
           fetchPolygonBars(ticker, from730, to, polygonKey),
@@ -393,6 +423,21 @@ export async function POST(req: NextRequest) {
         const return3M = price3MAgo > 0 ? latestPrice / price3MAgo - 1 : 0;
         const return12M = price12MAgo > 0 ? latestPrice / price12MAgo - 1 : 0;
 
+        // Compute macro correlations now (data already fetched) so Claude can use them
+        const stockReturnsEarly = computeReturnsFromPrices(sortedBars);
+        const macroReturns = {
+          oil:   usoBars ? computeReturnsFromPrices(usoBars)  : null,
+          rates: tltBars ? computeReturnsFromPrices(tltBars)  : null,
+          vix:   vxxBars ? computeReturnsFromPrices(vxxBars)  : null,
+          gold:  gldBars ? computeReturnsFromPrices(gldBars)  : null,
+        };
+        const macroCors = {
+          oil:   pearsonCorr(stockReturnsEarly, macroReturns.oil   ?? []),
+          rates: pearsonCorr(stockReturnsEarly, macroReturns.rates ?? []),
+          vix:   pearsonCorr(stockReturnsEarly, macroReturns.vix   ?? []),
+          gold:  pearsonCorr(stockReturnsEarly, macroReturns.gold  ?? []),
+        };
+
         // ── Stage 2: Claude Researching ──────────────────────────────────────
         let claudeAnalysis: ClaudeAnalysis | undefined;
         let claudeError: string | undefined;
@@ -409,7 +454,8 @@ export async function POST(req: NextRequest) {
               metricsArr,
               ratiosArr,
               return3M,
-              return12M
+              return12M,
+              macroCors
             );
 
             const partial = await callClaude(researchPrompt, claudeKey);
@@ -428,21 +474,20 @@ export async function POST(req: NextRequest) {
         // ── Stage 4: Calculating ─────────────────────────────────────────────
         send({ stage: "calculating", message: "Calculating..." });
 
-        const stockReturns: DailyReturn[] = computeReturnsFromPrices(stockBars);
+        const stockReturns: DailyReturn[] = stockReturnsEarly;
         const marketReturns: DailyReturn[] = computeReturnsFromPrices(spyBars);
 
         // Fetch Peers for correlation
         let correlatedStocks: { ticker: string; returns: DailyReturn[]; correlation: number }[] = [];
-        const peerContext = profile?.industry || profile?.sector || "Technology";
         try {
           const peers = await fmpGet<{ symbol: string }[]>(
-            `/stock-screener?${profile?.industry ? `industry=${encodeURIComponent(profile.industry)}` : `sector=${encodeURIComponent(profile?.sector || "Technology")}`}&limit=15`,
+            `/stock-screener?${profile?.industry ? `industry=${encodeURIComponent(profile.industry)}` : `sector=${encodeURIComponent(profile?.sector || "Technology")}`}&limit=10`,
             fmpKey
           );
           const peerTickers = peers
             .map((p) => p.symbol)
             .filter((t) => t !== ticker)
-            .slice(0, 12);
+            .slice(0, 6);
 
           const peerHistories = await Promise.all(
             peerTickers.map((t) =>
@@ -454,21 +499,7 @@ export async function POST(req: NextRequest) {
               const hist = peerHistories[i];
               if (!hist || hist.length < 60) continue;
               const pReturns = computeReturnsFromPrices(hist);
-              const { stock: sR, market: pR } = alignReturns(stockReturns, pReturns);
-              if (sR.length < 30) continue;
-
-              // Pearson correlation
-              const meanS = sR.reduce((a: number, b: number) => a + b, 0) / sR.length;
-              const meanP = pR.reduce((a: number, b: number) => a + b, 0) / pR.length;
-              let num = 0, denS = 0, denP = 0;
-              for (let j = 0; j < sR.length; j++) {
-                const ds = sR[j] - meanS;
-                const dp = pR[j] - meanP;
-                num += ds * dp;
-                denS += ds * ds;
-                denP += dp * dp;
-              }
-              const corr = denS > 0 && denP > 0 ? num / Math.sqrt(denS * denP) : 0;
+              const corr = pearsonCorr(stockReturns, pReturns) ?? 0;
               correlatedStocks.push({ ticker: peerTickers[i], returns: pReturns, correlation: corr });
             }
             // Sort by absolute correlation and take top 10
@@ -538,7 +569,9 @@ export async function POST(req: NextRequest) {
           balanceArr,
           riskMetrics,
           volatility,
-          ticker
+          ticker,
+          claudeAnalysis?.ffFactorEmphasis,
+          macroReturns
         );
 
         // Base quant score with default 30/25/20/15/10 weights
@@ -557,15 +590,10 @@ export async function POST(req: NextRequest) {
           stockBars,
           famaFrench,
           volatility,
-          riskMetrics
+          riskMetrics,
+          30,
+          claudeAnalysis?.selectedFormula
         ) ?? undefined;
-
-        const macroReturns = {
-          oil: usoBars ? computeReturnsFromPrices(usoBars) : null,
-          rates: tltBars ? computeReturnsFromPrices(tltBars) : null,
-          vix: vxxBars ? computeReturnsFromPrices(vxxBars) : null,
-          gold: gldBars ? computeReturnsFromPrices(gldBars) : null,
-        };
 
         // Quant price path — single composite line, pure quant signals
         const quantPricePath = computeQuantPricePath(
