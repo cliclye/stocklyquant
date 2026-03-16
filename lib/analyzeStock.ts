@@ -406,7 +406,7 @@ export async function analyzeStock(
     fmpGet<FMPBalanceSheet[]>(`/balance-sheet-statement/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPBalanceSheet[]),
   ]);
 
-  const profile: FMPProfile | null = profileArr[0] ?? null;
+  let profile: FMPProfile | null = profileArr[0] ?? null;
   const latestMetric: FMPKeyMetrics | null = metricsArr[0] ?? null;
   const latestRatio: FMPRatios | null = ratiosArr[0] ?? null;
 
@@ -414,8 +414,22 @@ export async function analyzeStock(
     (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
   );
   const latestPrice = sortedBars[sortedBars.length - 1]?.price ?? 0;
-  // Ensure profile reflects the actual latest price from Polygon bars
-  if (profile && latestPrice > 0) profile.price = latestPrice;
+
+  // If FMP profile is unavailable, build a minimal fallback from Polygon ticker details
+  if (!profile) {
+    let companyName = ticker;
+    try {
+      const detailsRes = await fetch(
+        `https://api.polygon.io/v3/reference/tickers/${ticker.toUpperCase()}?apiKey=${polygonKey}`,
+        { cache: "no-store" }
+      );
+      const detailsData = await detailsRes.json();
+      companyName = detailsData?.results?.name ?? ticker;
+    } catch { /* keep ticker as fallback name */ }
+    profile = { symbol: ticker, companyName, price: latestPrice };
+  } else if (latestPrice > 0) {
+    profile.price = latestPrice;
+  }
   const price3MAgo = sortedBars[Math.max(0, sortedBars.length - 63)]?.price ?? latestPrice;
   const price12MAgo = sortedBars[Math.max(0, sortedBars.length - 252)]?.price ?? latestPrice;
   const return3M = price3MAgo > 0 ? latestPrice / price3MAgo - 1 : 0;
