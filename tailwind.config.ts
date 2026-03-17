@@ -9,6 +9,22 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      colors: {
+        primary: "#22d3ee",       // cyan-400
+        warning: "#fbbf24",       // amber-400
+        surface: {
+          DEFAULT:   "#0f172a",   // slate-900
+          highlight: "#1e293b",   // slate-800
+        },
+        border: {
+          DEFAULT: "#1e293b",     // slate-800
+        },
+        background: "#020617",    // slate-950
+        text: {
+          primary:   "#f1f5f9",   // slate-100
+          secondary: "#94a3b8",   // slate-400
+        },
+      },
       animation: {
         "fade-in":    "fadeIn 0.25s ease-out forwards",
         "slide-up":   "slideUp 0.3s ease-out forwards",

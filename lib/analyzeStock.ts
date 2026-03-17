@@ -81,6 +81,8 @@ async function fmpGet<T>(path: string, fmpKey: string): Promise<T> {
     { cache: "no-store" }
   );
   if (res.status === 403) throw new Error("Invalid FMP API key");
+  if (res.status === 429) throw new Error("FMP rate limited — please try again later");
+  if (!res.ok) throw new Error(`FMP API error (HTTP ${res.status}) for ${path}`);
   return res.json();
 }
 
@@ -398,8 +400,14 @@ export async function analyzeStock(
     fetchPolygonBars("GLD", from2y, to, polygonKey).catch(() => null as PricePoint[] | null),
   ]);
 
-  const [profileArr, metricsArr, ratiosArr, incomeArr, balanceArr] = await Promise.all([
-    fmpGet<FMPProfile[]>(`/profile/${ticker}`, fmpKey).catch(() => [] as FMPProfile[]),
+  let profileArr: FMPProfile[];
+  try {
+    profileArr = await fmpGet<FMPProfile[]>(`/profile/${ticker}`, fmpKey);
+  } catch (err) {
+    throw new Error(`Failed to fetch company profile for ${ticker}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const [metricsArr, ratiosArr, incomeArr, balanceArr] = await Promise.all([
     fmpGet<FMPKeyMetrics[]>(`/key-metrics/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPKeyMetrics[]),
     fmpGet<FMPRatios[]>(`/ratios/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPRatios[]),
     fmpGet<FMPIncomeStatement[]>(`/income-statement/${ticker}?period=annual&limit=5`, fmpKey).catch(() => [] as FMPIncomeStatement[]),
@@ -414,6 +422,9 @@ export async function analyzeStock(
     (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
   );
   const latestPrice = sortedBars[sortedBars.length - 1]?.price ?? 0;
+  if (latestPrice <= 0) {
+    throw new Error(`Unable to determine current price for ${ticker} — no valid price data available`);
+  }
 
   // If FMP profile is unavailable, build a minimal fallback from Polygon ticker details
   if (!profile) {
