@@ -71,13 +71,15 @@ function SearchInput({
         )}
       </div>
 
-      {/* Suggestions Dropdown */}
-      {suggestions.length > 0 && (
+      {/* Suggestions Dropdown (show while loading so the panel is not silently empty) */}
+      {(loadingSuggestions || suggestions.length > 0) && (
         <div className="absolute top-full left-0 right-0 mt-1 bg-slate-900 border border-slate-700 rounded-lg overflow-hidden shadow-2xl shadow-black/50 z-50">
           {loadingSuggestions ? (
             <div className="p-3 flex justify-center">
               <Loader2 size={16} className="animate-spin text-cyan-500" />
             </div>
+          ) : suggestions.length === 0 ? (
+            <div className="px-4 py-3 text-sm text-slate-500 text-center">No tickers found</div>
           ) : (
             suggestions.slice(0, 6).map((s) => (
               <button
@@ -177,36 +179,66 @@ export default function StockSearch() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let streamFinished = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
+      function applyProgressEvent(event: ProgressEvent) {
+        switch (event.stage) {
+          case "fetching":    setLoadingStage("Fetching Stock Data..."); break;
+          case "researching": setLoadingStage("Claude Researching..."); break;
+          case "selecting":   setLoadingStage("Selecting Best Formula..."); break;
+          case "calculating": setLoadingStage("Calculating..."); break;
+          case "reporting":   setLoadingStage("Generating Report..."); break;
+          case "complete":
+            if (event.result) setCurrentAnalysis(event.result as QuantAnalysis);
+            streamFinished = true;
+            setAnalyzing(false);
+            break;
+          case "error":
+            setError(event.error ?? "Analysis failed");
+            streamFinished = true;
+            setAnalyzing(false);
+            break;
+        }
+      }
 
+      /** Split on SSE event boundaries; the last segment may be an incomplete frame. */
+      function consumeFullSseEvents(text: string): string {
+        const parts = text.split("\n\n");
+        const tail = parts.pop() ?? "";
         for (const chunk of parts) {
           const line = chunk.replace(/^data: /, "").trim();
           if (!line) continue;
-          let event: ProgressEvent;
-          try { event = JSON.parse(line); } catch { continue; }
-
-          switch (event.stage) {
-            case "fetching":    setLoadingStage("Fetching Stock Data..."); break;
-            case "researching": setLoadingStage("Claude Researching..."); break;
-            case "selecting":   setLoadingStage("Selecting Best Formula..."); break;
-            case "calculating": setLoadingStage("Calculating..."); break;
-            case "reporting":   setLoadingStage("Generating Report..."); break;
-            case "complete":
-              if (event.result) setCurrentAnalysis(event.result as QuantAnalysis);
-              setAnalyzing(false);
-              break;
-            case "error":
-              setError(event.error ?? "Analysis failed");
-              setAnalyzing(false);
-              break;
+          try {
+            applyProgressEvent(JSON.parse(line) as ProgressEvent);
+          } catch {
+            /* ignore malformed chunk */
           }
         }
+        return tail;
+      }
+
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        buffer = consumeFullSseEvents(buffer);
+        if (done) break;
+      }
+
+      // Final frame often arrives without a trailing blank line — flush it.
+      if (buffer.trim()) {
+        const line = buffer.replace(/^data: /, "").trim();
+        if (line) {
+          try {
+            applyProgressEvent(JSON.parse(line) as ProgressEvent);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      if (!streamFinished) {
+        setError("Analysis stream ended before completion.");
+        setAnalyzing(false);
       }
     } catch {
       setError("Network error. Please try again.");
@@ -239,6 +271,13 @@ export default function StockSearch() {
           </div>
 
           <SearchInput large {...searchInputProps} />
+
+          {error && (
+            <div className="flex items-start gap-2 text-rose-400 text-xs font-medium bg-rose-500/10 border border-rose-500/20 rounded-lg px-3 py-2 text-left">
+              <AlertCircle size={14} className="shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
 
           {!hasKeys && (
             <div className="flex items-start gap-3 bg-amber-500/5 border border-amber-500/20 rounded-lg p-4 text-left">
