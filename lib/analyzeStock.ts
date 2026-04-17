@@ -1,6 +1,6 @@
 /**
- * Core analysis pipeline, shared between the SSE streaming route and the
- * background cron job. All helper functions live here; the API route is just
+ * Core analysis pipeline, shared between the SSE streaming route and other
+ * server callers. All helper functions live here; the API route is just
  * a thin SSE wrapper.
  */
 

@@ -1,10 +1,8 @@
 "use client";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   FlaskConical,
   RefreshCw,
-  Plus,
-  X,
   CheckCircle2,
   XCircle,
   Clock,
@@ -12,69 +10,19 @@ import {
   TrendingDown,
   AlertCircle,
   BarChart3,
+  Play,
 } from "lucide-react";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface AccuracySummary {
-  totalPredictions: number;
-  evaluated: number;
-  pending: number;
-  directionalAccuracy: number;
-  ciCoverageRate: number;
-  meanAbsoluteErrorPct: number;
-}
-
-interface FormulaRow {
-  formula: string;
-  count: number;
-  directionalAccuracy: number;
-  mape: number;
-}
-
-interface TickerRow {
-  ticker: string;
-  count: number;
-  directionalAccuracy: number;
-  mape: number;
-  avgQuantScore: number;
-}
-
-interface RecentResult {
-  ticker: string;
-  predictionDate: string;
-  evaluationDate: string;
-  startPrice: number;
-  predictedPrice: number;
-  actualPrice: number;
-  predictedReturn: number;
-  actualReturn: number;
-  inCi95: boolean | null;
-  directionCorrect: boolean;
-  predictionErrorPct: number;
-  quantScore: number;
-  formulaUsed: string;
-}
-
-interface RecentPrediction {
-  ticker: string;
-  prediction_date: string;
-  predicted_return_30d: number;
-  predicted_direction: string;
-  quant_score: number;
-  formula_used: string;
-  is_evaluated: boolean;
-}
-
-interface AccuracyData {
-  summary: AccuracySummary;
-  byFormula: FormulaRow[];
-  byTicker: TickerRow[];
-  recentPredictions: RecentPrediction[];
-  recentResults: RecentResult[];
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+import { useApp } from "@/lib/context";
+import {
+  ACCURACY_UPDATED_EVENT,
+  applyEvaluationUpdates,
+  buildAccuracyDashboardData,
+  loadAccuracyRecords,
+  recordsDueForEvaluation,
+  saveAccuracyRecords,
+  type AccuracyDashboardData,
+  type LocalAccuracyEvaluation,
+} from "@/lib/localAccuracy";
 
 function pct(v: number, decimals = 1): string {
   return `${(v * 100).toFixed(decimals)}%`;
@@ -90,85 +38,100 @@ function scoreColor(v: number): string {
   return "text-red-400";
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
 export default function AccuracyDashboard() {
-  const [data, setData] = useState<AccuracyData | null>(null);
-  const [stocks, setStocks] = useState<{ ticker: string; added_at: string }[]>([]);
+  const { apiKeys, envKeysSet } = useApp();
+  const [data, setData] = useState<AccuracyDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [addInput, setAddInput] = useState("");
-  const [addLoading, setAddLoading] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [evaluateLoading, setEvaluateLoading] = useState(false);
+  const [evaluateError, setEvaluateError] = useState("");
 
-  async function loadAll() {
-    setLoading(true);
-    setError("");
-    try {
-      const [accRes, stocksRes] = await Promise.all([
-        fetch("/api/accuracy"),
-        fetch("/api/accuracy/stocks"),
-      ]);
+  const hasPolygon = Boolean(envKeysSet || apiKeys.polygon);
 
-      if (!accRes.ok) {
-        const j = await accRes.json();
-        throw new Error(j.error ?? "Failed to load accuracy data");
-      }
-      if (!stocksRes.ok) {
-        const j = await stocksRes.json();
-        throw new Error(j.error ?? "Failed to load stocks");
-      }
-
-      const [accData, stocksData] = await Promise.all([accRes.json(), stocksRes.json()]);
-      setData(accData);
-      setStocks(stocksData.stocks ?? []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load data");
-    } finally {
-      setLoading(false);
-    }
+  function refreshFromStorage() {
+    const records = loadAccuracyRecords();
+    setData(buildAccuracyDashboardData(records));
+    setLoading(false);
   }
 
   useEffect(() => {
-    loadAll();
+    refreshFromStorage();
+    const onUpdate = () => refreshFromStorage();
+    window.addEventListener(ACCURACY_UPDATED_EVENT, onUpdate);
+    window.addEventListener("storage", onUpdate);
+    return () => {
+      window.removeEventListener(ACCURACY_UPDATED_EVENT, onUpdate);
+      window.removeEventListener("storage", onUpdate);
+    };
   }, []);
 
-  async function addStock() {
-    const ticker = addInput.trim().toUpperCase();
-    if (!ticker) return;
-    setAddLoading(true);
+  async function evaluateDue() {
+    const records = loadAccuracyRecords();
+    const due = recordsDueForEvaluation(records, 30);
+    if (!due.length) {
+      window.alert(
+        "No unevaluated predictions are due yet. Predictions must be at least 30 calendar days old."
+      );
+      return;
+    }
+    if (!hasPolygon) {
+      window.alert(
+        "A Polygon API key is required. Add it in Settings, or set POLYGON_API_KEY for server-side use."
+      );
+      return;
+    }
+
+    setEvaluateLoading(true);
+    setEvaluateError("");
     try {
-      const res = await fetch("/api/accuracy/stocks", {
+      const items = due.map((r) => ({
+        id: r.id,
+        ticker: r.ticker,
+        predictionDate: r.predictionDate,
+        startPrice: r.startPrice,
+        predictedPrice30d: r.predictedPrice30d,
+        predictedUpper95: r.predictedUpper95,
+        predictedLower95: r.predictedLower95,
+        predictedDirection: r.predictedDirection,
+      }));
+
+      const res = await fetch("/api/accuracy/evaluate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticker }),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          polygonKey: envKeysSet ? undefined : apiKeys.polygon,
+          items,
+        }),
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.error ?? "Failed to add");
-      setStocks((prev) => [...prev.filter((s) => s.ticker !== ticker), { ticker, added_at: new Date().toISOString() }].sort((a, b) => a.ticker.localeCompare(b.ticker)));
-      setAddInput("");
-      inputRef.current?.focus();
+      const body = (await res.json()) as {
+        error?: string;
+        results?: { id: string; evaluation: LocalAccuracyEvaluation }[];
+        errors?: { id: string; error: string }[];
+      };
+
+      if (!res.ok) {
+        throw new Error(body.error ?? "Evaluation failed");
+      }
+
+      const updates = (body.results ?? []).map((x) => ({
+        id: x.id,
+        evaluation: x.evaluation,
+      }));
+      const next = applyEvaluationUpdates(loadAccuracyRecords(), updates);
+      saveAccuracyRecords(next);
+      setData(buildAccuracyDashboardData(next));
+
+      if (body.errors?.length) {
+        console.warn("[AccuracyDashboard] Partial failures:", body.errors);
+        const msg = body.errors.map((e) => `${e.id}: ${e.error}`).join("; ");
+        setEvaluateError(`Some tickers failed: ${msg.slice(0, 400)}${msg.length > 400 ? "…" : ""}`);
+      }
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to add stock");
+      setEvaluateError(e instanceof Error ? e.message : "Evaluation failed");
     } finally {
-      setAddLoading(false);
+      setEvaluateLoading(false);
     }
   }
 
-  async function removeStock(ticker: string) {
-    try {
-      await fetch("/api/accuracy/stocks", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticker }),
-      });
-      setStocks((prev) => prev.filter((s) => s.ticker !== ticker));
-    } catch {
-      alert("Failed to remove stock");
-    }
-  }
-
-  // ── Loading ────────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -178,43 +141,11 @@ export default function AccuracyDashboard() {
     );
   }
 
-  // ── Error / Not configured ─────────────────────────────────────────────────
-  if (error) {
-    const isConfig = error.toLowerCase().includes("not configured");
-    return (
-      <div className="flex flex-col items-center justify-center h-64 text-center animate-fade-in">
-        <div className="w-16 h-16 rounded-2xl bg-warning/10 border border-warning/20 flex items-center justify-center mb-4">
-          <AlertCircle size={28} className="text-warning" />
-        </div>
-        <h3 className="text-xl font-bold text-slate-50 mb-2">
-          {isConfig ? "Supabase Not Configured" : "Error Loading Data"}
-        </h3>
-        <p className="text-slate-400 max-w-sm text-sm mb-4">{error}</p>
-        {isConfig && (
-          <p className="text-slate-400 max-w-sm text-xs">
-            Add <code className="text-primary bg-surface px-1 py-0.5 rounded">NEXT_PUBLIC_SUPABASE_URL</code>,{" "}
-            <code className="text-primary bg-surface px-1 py-0.5 rounded">NEXT_PUBLIC_SUPABASE_ANON_KEY</code>, and{" "}
-            <code className="text-primary bg-surface px-1 py-0.5 rounded">SUPABASE_SERVICE_KEY</code> to your{" "}
-            environment variables to enable accuracy tracking.
-          </p>
-        )}
-        <button
-          onClick={loadAll}
-          className="mt-4 px-4 py-2 rounded-lg bg-cyan-500/10 text-primary border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors text-sm"
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-
   const s = data?.summary;
 
-  // ── Main dashboard ─────────────────────────────────────────────────────────
   return (
     <div className="space-y-8 pb-10 animate-fade-in">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
             <FlaskConical size={20} className="text-primary" />
@@ -222,28 +153,58 @@ export default function AccuracyDashboard() {
           <div>
             <h1 className="text-2xl font-bold text-slate-50">Accuracy Testing</h1>
             <p className="text-slate-400 text-sm">
-              Daily cron analyses test stocks and tracks 30-day prediction accuracy
+              Predictions from your Analysis runs are stored in this browser
             </p>
           </div>
         </div>
-        <button
-          onClick={loadAll}
-          className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface border border-border text-slate-400 hover:text-slate-50 hover:bg-slate-800 transition-colors text-sm"
-        >
-          <RefreshCw size={14} />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={evaluateDue}
+            disabled={evaluateLoading || !hasPolygon}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-cyan-500/10 text-primary border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {evaluateLoading ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />}
+            Evaluate due (30d+)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setLoading(true);
+              refreshFromStorage();
+            }}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface border border-border text-slate-400 hover:text-slate-50 hover:bg-slate-800 transition-colors text-sm"
+          >
+            <RefreshCw size={14} />
+            Refresh
+          </button>
+        </div>
       </div>
 
-      {/* Status notice */}
+      {!hasPolygon && (
+        <div className="flex items-start gap-2 text-amber-400 text-sm bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+          <AlertCircle size={16} className="shrink-0 mt-0.5" />
+          <span>
+            Add a Polygon key in Settings to evaluate predictions (fetch actual prices).
+          </span>
+        </div>
+      )}
+
+      {evaluateError && (
+        <div className="flex items-start gap-2 text-rose-400 text-sm bg-rose-500/10 border border-rose-500/20 rounded-lg px-3 py-2">
+          <AlertCircle size={16} className="shrink-0 mt-0.5" />
+          <span>{evaluateError}</span>
+        </div>
+      )}
+
       <div className="bg-primary/5 border border-cyan-500/20 rounded-xl p-4 text-sm text-slate-400">
         <span className="text-primary font-medium">How it works: </span>
-        A Vercel cron job runs hourly on weekdays, analyzing one test stock per run. After 30 days, a
-        second cron job fetches the actual price and records whether the prediction was accurate.
-        Results accumulate over time — the more predictions, the more meaningful the accuracy stats.
+        Each time you finish a stock analysis on the Analysis tab, a snapshot of the 30-day price
+        forecast is saved locally in your browser. When a prediction is at least 30 calendar days
+        old, use <strong className="text-slate-300">Evaluate due</strong> to compare the forecast to
+        actual market prices (via Polygon). Nothing is sent to a database or cron job.
       </div>
 
-      {/* Summary cards */}
       {s && (
         <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           <StatCard
@@ -276,25 +237,34 @@ export default function AccuracyDashboard() {
             value={s.evaluated > 0 ? pct(s.ciCoverageRate) : "—"}
             sublabel="target: ~95%"
             icon={<CheckCircle2 size={16} />}
-            color={s.evaluated > 0 ? (s.ciCoverageRate >= 0.9 ? "text-emerald-400" : "text-yellow-400") : "text-slate-400"}
+            color={
+              s.evaluated > 0 ? (s.ciCoverageRate >= 0.9 ? "text-emerald-400" : "text-yellow-400") : "text-slate-400"
+            }
           />
           <StatCard
             label="Mean Abs. Error"
             value={s.evaluated > 0 ? `${s.meanAbsoluteErrorPct.toFixed(1)}%` : "—"}
             sublabel="30d price error"
             icon={<AlertCircle size={16} />}
-            color={s.evaluated > 0 ? (s.meanAbsoluteErrorPct < 5 ? "text-emerald-400" : s.meanAbsoluteErrorPct < 10 ? "text-yellow-400" : "text-red-400") : "text-slate-400"}
+            color={
+              s.evaluated > 0
+                ? s.meanAbsoluteErrorPct < 5
+                  ? "text-emerald-400"
+                  : s.meanAbsoluteErrorPct < 10
+                    ? "text-yellow-400"
+                    : "text-red-400"
+                : "text-slate-400"
+            }
           />
         </div>
       )}
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        {/* Formula leaderboard */}
         {(data?.byFormula?.length ?? 0) > 0 && (
           <div className="bg-surface border border-border rounded-xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border">
               <h2 className="font-semibold text-slate-50 text-sm">Formula Performance</h2>
-              <p className="text-slate-400 text-xs mt-0.5">Directional accuracy by Claude-selected formula</p>
+              <p className="text-slate-400 text-xs mt-0.5">Directional accuracy by selected formula</p>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -314,9 +284,7 @@ export default function AccuracyDashboard() {
                       <td className={`px-4 py-3 text-right font-medium ${scoreColor(row.directionalAccuracy)}`}>
                         {pct(row.directionalAccuracy)}
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-400">
-                        {row.mape.toFixed(1)}%
-                      </td>
+                      <td className="px-5 py-3 text-right text-slate-400">{row.mape.toFixed(1)}%</td>
                     </tr>
                   ))}
                 </tbody>
@@ -325,12 +293,11 @@ export default function AccuracyDashboard() {
           </div>
         )}
 
-        {/* Per-ticker breakdown */}
         {(data?.byTicker?.length ?? 0) > 0 && (
           <div className="bg-surface border border-border rounded-xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border">
               <h2 className="font-semibold text-slate-50 text-sm">Per-Ticker Accuracy</h2>
-              <p className="text-slate-400 text-xs mt-0.5">How well each stock's predictions perform</p>
+              <p className="text-slate-400 text-xs mt-0.5">Evaluated predictions by symbol</p>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -351,12 +318,8 @@ export default function AccuracyDashboard() {
                       <td className={`px-4 py-3 text-right font-medium ${scoreColor(row.directionalAccuracy)}`}>
                         {pct(row.directionalAccuracy)}
                       </td>
-                      <td className="px-4 py-3 text-right text-slate-400">
-                        {row.mape.toFixed(1)}%
-                      </td>
-                      <td className="px-5 py-3 text-right text-slate-400">
-                        {row.avgQuantScore.toFixed(0)}
-                      </td>
+                      <td className="px-4 py-3 text-right text-slate-400">{row.mape.toFixed(1)}%</td>
+                      <td className="px-5 py-3 text-right text-slate-400">{row.avgQuantScore.toFixed(0)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -366,12 +329,11 @@ export default function AccuracyDashboard() {
         )}
       </div>
 
-      {/* Recent evaluated results */}
       {(data?.recentResults?.length ?? 0) > 0 && (
         <div className="bg-surface border border-border rounded-xl overflow-hidden">
           <div className="px-5 py-4 border-b border-border">
             <h2 className="font-semibold text-slate-50 text-sm">Recent Evaluated Predictions</h2>
-            <p className="text-slate-400 text-xs mt-0.5">Latest 20 results with actual vs. predicted comparison</p>
+            <p className="text-slate-400 text-xs mt-0.5">Latest results with actual vs. predicted comparison</p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -396,23 +358,29 @@ export default function AccuracyDashboard() {
                     <td className="px-4 py-3 text-slate-400 text-xs">{r.evaluationDate}</td>
                     <td className="px-4 py-3 text-right text-slate-400">{fmtPrice(r.startPrice)}</td>
                     <td className="px-4 py-3 text-right text-slate-400">{fmtPrice(r.predictedPrice)}</td>
-                    <td className={`px-4 py-3 text-right font-medium ${r.actualReturn > 0 ? "text-emerald-400" : r.actualReturn < 0 ? "text-red-400" : "text-slate-400"}`}>
+                    <td
+                      className={`px-4 py-3 text-right font-medium ${
+                        r.actualReturn > 0 ? "text-emerald-400" : r.actualReturn < 0 ? "text-red-400" : "text-slate-400"
+                      }`}
+                    >
                       {fmtPrice(r.actualPrice)}
                     </td>
-                    <td className="px-4 py-3 text-right text-slate-400">
-                      {r.predictionErrorPct.toFixed(1)}%
-                    </td>
+                    <td className="px-4 py-3 text-right text-slate-400">{r.predictionErrorPct.toFixed(1)}%</td>
                     <td className="px-4 py-3 text-center">
-                      {r.directionCorrect
-                        ? <CheckCircle2 size={14} className="text-emerald-400 mx-auto" />
-                        : <XCircle size={14} className="text-red-400 mx-auto" />}
+                      {r.directionCorrect ? (
+                        <CheckCircle2 size={14} className="text-emerald-400 mx-auto" />
+                      ) : (
+                        <XCircle size={14} className="text-red-400 mx-auto" />
+                      )}
                     </td>
                     <td className="px-5 py-3 text-center">
-                      {r.inCi95 === null
-                        ? <span className="text-slate-400 text-xs">—</span>
-                        : r.inCi95
-                          ? <CheckCircle2 size={14} className="text-emerald-400 mx-auto" />
-                          : <XCircle size={14} className="text-red-400 mx-auto" />}
+                      {r.inCi95 === null ? (
+                        <span className="text-slate-400 text-xs">—</span>
+                      ) : r.inCi95 ? (
+                        <CheckCircle2 size={14} className="text-emerald-400 mx-auto" />
+                      ) : (
+                        <XCircle size={14} className="text-red-400 mx-auto" />
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -422,12 +390,11 @@ export default function AccuracyDashboard() {
         </div>
       )}
 
-      {/* Recent pending predictions */}
       {(data?.recentPredictions?.length ?? 0) > 0 && (
         <div className="bg-surface border border-border rounded-xl overflow-hidden">
           <div className="px-5 py-4 border-b border-border">
             <h2 className="font-semibold text-slate-50 text-sm">Recent Predictions</h2>
-            <p className="text-slate-400 text-xs mt-0.5">Latest recorded predictions awaiting 30-day evaluation</p>
+            <p className="text-slate-400 text-xs mt-0.5">Saved from your analyses (newest first)</p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -447,20 +414,33 @@ export default function AccuracyDashboard() {
                   <tr key={i} className="border-b border-slate-800/30 hover:bg-slate-800/30 transition-colors">
                     <td className="px-5 py-3 text-slate-50 font-semibold">{p.ticker}</td>
                     <td className="px-4 py-3 text-slate-400 text-xs">{p.prediction_date}</td>
-                    <td className={`px-4 py-3 text-right font-medium ${Number(p.predicted_return_30d) > 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      {Number(p.predicted_return_30d) >= 0 ? "+" : ""}{(Number(p.predicted_return_30d) * 100).toFixed(1)}%
+                    <td
+                      className={`px-4 py-3 text-right font-medium ${
+                        Number(p.predicted_return_30d) > 0 ? "text-emerald-400" : "text-red-400"
+                      }`}
+                    >
+                      {Number(p.predicted_return_30d) >= 0 ? "+" : ""}
+                      {(Number(p.predicted_return_30d) * 100).toFixed(1)}%
                     </td>
                     <td className="px-4 py-3 text-center">
-                      {p.predicted_direction === "UP"
-                        ? <TrendingUp size={14} className="text-emerald-400 mx-auto" />
-                        : <TrendingDown size={14} className="text-red-400 mx-auto" />}
+                      {p.predicted_direction === "UP" ? (
+                        <TrendingUp size={14} className="text-emerald-400 mx-auto" />
+                      ) : (
+                        <TrendingDown size={14} className="text-red-400 mx-auto" />
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right text-slate-400">{Number(p.quant_score).toFixed(0)}</td>
                     <td className="px-5 py-3 text-slate-400 font-mono text-xs">{p.formula_used}</td>
                     <td className="px-5 py-3 text-center">
-                      {p.is_evaluated
-                        ? <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-400/10 text-emerald-400 border border-emerald-400/20">Evaluated</span>
-                        : <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/10 text-primary border border-cyan-500/20">Pending</span>}
+                      {p.is_evaluated ? (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-400/10 text-emerald-400 border border-emerald-400/20">
+                          Evaluated
+                        </span>
+                      ) : (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/10 text-primary border border-cyan-500/20">
+                          Pending
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -470,67 +450,15 @@ export default function AccuracyDashboard() {
         </div>
       )}
 
-      {/* Test stock management */}
-      <div className="bg-surface border border-border rounded-xl overflow-hidden">
-        <div className="px-5 py-4 border-b border-border">
-          <h2 className="font-semibold text-slate-50 text-sm">Test Stock List</h2>
-          <p className="text-slate-400 text-xs mt-0.5">
-            Stocks tracked daily by the cron job. Add any valid US ticker.
-          </p>
+      {(data?.summary?.totalPredictions ?? 0) === 0 && (
+        <div className="bg-surface border border-border rounded-xl p-6 text-center text-slate-400 text-sm">
+          No predictions stored yet. Run a full analysis from the <strong className="text-slate-300">Analysis</strong>{" "}
+          tab; when it completes, the forecast snapshot is saved here automatically.
         </div>
-        <div className="p-5 space-y-4">
-          {/* Add input */}
-          <div className="flex gap-2">
-            <input
-              ref={inputRef}
-              value={addInput}
-              onChange={(e) => setAddInput(e.target.value.toUpperCase())}
-              onKeyDown={(e) => e.key === "Enter" && !addLoading && addStock()}
-              placeholder="Add ticker (e.g. AAPL)"
-              className="flex-1 bg-background border border-border rounded-lg px-4 py-2 text-slate-50 placeholder:text-slate-400 text-sm focus:outline-none focus:border-primary/50 transition-colors"
-              maxLength={10}
-            />
-            <button
-              onClick={addStock}
-              disabled={addLoading || !addInput.trim()}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-500/10 text-primary border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {addLoading ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
-              Add
-            </button>
-          </div>
-
-          {/* Stock chips */}
-          {stocks.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {stocks.map((s) => (
-                <div
-                  key={s.ticker}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-border text-sm text-slate-50"
-                >
-                  <span className="font-medium">{s.ticker}</span>
-                  <button
-                    onClick={() => removeStock(s.ticker)}
-                    className="text-slate-400 hover:text-red-400 transition-colors ml-1"
-                    aria-label={`Remove ${s.ticker}`}
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-slate-400 text-sm">
-              No test stocks configured. Add tickers above or run the Supabase SQL schema to seed the default list.
-            </p>
-          )}
-        </div>
-      </div>
+      )}
     </div>
   );
 }
-
-// ─── Stat card ────────────────────────────────────────────────────────────────
 
 function StatCard({
   label,
@@ -542,7 +470,7 @@ function StatCard({
   label: string;
   value: string;
   sublabel?: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   color: string;
 }) {
   return (

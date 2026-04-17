@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Search, Loader2, AlertCircle, X, ArrowRight, Zap, CheckCircle2 } from "lucide-react";
 import type { StockSearchResult, QuantAnalysis, ProgressEvent } from "@/lib/types";
+import { appendPredictionFromAnalysis } from "@/lib/localAccuracy";
 import { useApp } from "@/lib/context";
 import StockDetail from "./StockDetail";
 
@@ -255,7 +256,9 @@ export default function StockSearch() {
           case "reporting":   setLoadingStage("Generating Report..."); break;
           case "complete":
             if (event.result) {
-              setCurrentAnalysis(event.result as QuantAnalysis);
+              const analysis = event.result as QuantAnalysis;
+              setCurrentAnalysis(analysis);
+              appendPredictionFromAnalysis(analysis);
             } else {
               const msg = "Analysis completed but returned no report data.";
               console.error("[StockSearch] SSE complete without result:", event);
