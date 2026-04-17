@@ -21,6 +21,8 @@ interface SearchInputProps {
   suggestions: StockSearchResult[];
   setSuggestions: React.Dispatch<React.SetStateAction<StockSearchResult[]>>;
   loadingSuggestions: boolean;
+  searchError: string;
+  setSearchError: React.Dispatch<React.SetStateAction<string>>;
   hasKeys: boolean | string;
   analyzing: boolean;
   analyze: (ticker: string) => void;
@@ -36,6 +38,8 @@ function SearchInput({
   suggestions,
   setSuggestions,
   loadingSuggestions,
+  searchError,
+  setSearchError,
   hasKeys,
   analyzing,
   analyze,
@@ -52,7 +56,10 @@ function SearchInput({
         <input
           type="text"
           value={query}
-          onChange={(e) => setQuery(e.target.value.toUpperCase())}
+          onChange={(e) => {
+            setSearchError("");
+            setQuery(e.target.value.toUpperCase());
+          }}
           onKeyDown={(e) => e.key === "Enter" && analyze(query.trim())}
           placeholder="Search ticker (e.g. AAPL, NVDA)..."
           className={`w-full bg-slate-900 text-slate-50 border border-slate-700 rounded-lg
@@ -63,7 +70,13 @@ function SearchInput({
         />
         {query && (
           <button
-            onClick={() => { setQuery(""); setSuggestions([]); setCurrentAnalysis(null); setError(""); }}
+            onClick={() => {
+              setQuery("");
+              setSuggestions([]);
+              setSearchError("");
+              setCurrentAnalysis(null);
+              setError("");
+            }}
             className="absolute right-3 text-slate-500 hover:text-slate-300 transition-colors"
           >
             <X size={15} />
@@ -101,6 +114,13 @@ function SearchInput({
           )}
         </div>
       )}
+
+      {searchError && (
+        <p className="mt-2 text-left text-xs font-medium text-rose-400 flex items-start gap-1.5">
+          <AlertCircle size={14} className="shrink-0 mt-0.5" />
+          <span>{searchError}</span>
+        </p>
+      )}
     </div>
   );
 }
@@ -113,6 +133,7 @@ export default function StockSearch() {
   const [analyzing, setAnalyzing] = useState(false);
   const [loadingStage, setLoadingStage] = useState("Fetching Stock Data...");
   const [error, setError] = useState("");
+  const [searchError, setSearchError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -129,18 +150,45 @@ export default function StockSearch() {
   const hasKeys = envKeysSet || (apiKeys.polygon && apiKeys.fmp);
 
   useEffect(() => {
-    if (!query.trim() || query.length < 1) { setSuggestions([]); return; }
+    if (!query.trim() || query.length < 1) {
+      setSuggestions([]);
+      setSearchError("");
+      return;
+    }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       if (!hasKeys) return;
       setLoadingSuggestions(true);
+      setSearchError("");
       try {
         const keyParam = envKeysSet ? "" : `&key=${encodeURIComponent(apiKeys.polygon)}`;
         const res = await fetch(`/api/search?q=${encodeURIComponent(query)}${keyParam}`);
-        const data = await res.json();
+        let data: { results?: StockSearchResult[]; error?: string };
+        try {
+          data = await res.json();
+        } catch {
+          const msg = `Search failed: could not read response (HTTP ${res.status})`;
+          console.error("[StockSearch]", msg);
+          setSuggestions([]);
+          setSearchError(msg);
+          return;
+        }
+        if (!res.ok) {
+          const msg = data.error ?? `Ticker search failed (HTTP ${res.status})`;
+          console.error("[StockSearch] Search API error:", res.status, data);
+          setSuggestions([]);
+          setSearchError(msg);
+          return;
+        }
         setSuggestions(data.results ?? []);
-      } catch { /* ignore */ }
-      finally { setLoadingSuggestions(false); }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Network error while searching";
+        console.error("[StockSearch] Search fetch failed:", e);
+        setSuggestions([]);
+        setSearchError(msg);
+      } finally {
+        setLoadingSuggestions(false);
+      }
     }, 350);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [query, hasKeys, apiKeys.polygon, envKeysSet]);
@@ -158,6 +206,7 @@ export default function StockSearch() {
     setSuggestions([]);
     setQuery(ticker);
     setError("");
+    setSearchError("");
     setAnalyzing(true);
     setLoadingStage("Fetching Stock Data...");
     setCurrentAnalysis(null);
@@ -169,9 +218,25 @@ export default function StockSearch() {
         body: JSON.stringify({ ticker, polygonKey: apiKeys.polygon, fmpKey: apiKeys.fmp, claudeKey: apiKeys.claude || undefined }),
       });
 
-      if (!res.ok || !res.body) {
-        const data = await res.json().catch(() => ({ error: "Analysis failed" }));
-        setError(data.error ?? "Analysis failed");
+      if (!res.ok) {
+        const raw = await res.text();
+        let message = `Analysis request failed (HTTP ${res.status})`;
+        try {
+          const data = JSON.parse(raw) as { error?: string };
+          if (data.error) message = data.error;
+        } catch {
+          if (raw.trim()) message = raw.trim().slice(0, 200);
+        }
+        console.error("[StockSearch] /api/analyze rejected:", res.status, raw.slice(0, 500));
+        setError(message);
+        setAnalyzing(false);
+        return;
+      }
+
+      if (!res.body) {
+        const msg = "Analysis returned no response body.";
+        console.error("[StockSearch]", msg);
+        setError(msg);
         setAnalyzing(false);
         return;
       }
@@ -189,7 +254,13 @@ export default function StockSearch() {
           case "calculating": setLoadingStage("Calculating..."); break;
           case "reporting":   setLoadingStage("Generating Report..."); break;
           case "complete":
-            if (event.result) setCurrentAnalysis(event.result as QuantAnalysis);
+            if (event.result) {
+              setCurrentAnalysis(event.result as QuantAnalysis);
+            } else {
+              const msg = "Analysis completed but returned no report data.";
+              console.error("[StockSearch] SSE complete without result:", event);
+              setError(msg);
+            }
             streamFinished = true;
             setAnalyzing(false);
             break;
@@ -210,8 +281,11 @@ export default function StockSearch() {
           if (!line) continue;
           try {
             applyProgressEvent(JSON.parse(line) as ProgressEvent);
-          } catch {
-            /* ignore malformed chunk */
+          } catch (parseErr) {
+            console.error("[StockSearch] Bad SSE JSON chunk:", line.slice(0, 200), parseErr);
+            setError("Received invalid data from the analysis server.");
+            streamFinished = true;
+            setAnalyzing(false);
           }
         }
         return tail;
@@ -230,25 +304,32 @@ export default function StockSearch() {
         if (line) {
           try {
             applyProgressEvent(JSON.parse(line) as ProgressEvent);
-          } catch {
-            /* ignore */
+          } catch (parseErr) {
+            console.error("[StockSearch] Bad SSE tail:", line.slice(0, 200), parseErr);
+            setError("Received invalid data from the analysis server.");
+            streamFinished = true;
+            setAnalyzing(false);
           }
         }
       }
 
       if (!streamFinished) {
-        setError("Analysis stream ended before completion.");
+        const msg = "Analysis stream ended before completion.";
+        console.error("[StockSearch]", msg);
+        setError(msg);
         setAnalyzing(false);
       }
-    } catch {
-      setError("Network error. Please try again.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Network error. Please try again.";
+      console.error("[StockSearch] Analyze failed:", e);
+      setError(msg);
       setAnalyzing(false);
     }
   }
 
   const searchInputProps = {
     wrapperRef, query, setQuery, suggestions, setSuggestions,
-    loadingSuggestions, hasKeys, analyzing, analyze, setCurrentAnalysis, setError,
+    loadingSuggestions, searchError, setSearchError, hasKeys, analyzing, analyze, setCurrentAnalysis, setError,
   };
 
   /* ── Hero State ─────────────────────────────────────────────────────────── */

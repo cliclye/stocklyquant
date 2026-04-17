@@ -39,6 +39,7 @@ export async function POST(req: NextRequest) {
         send({ stage: "complete", message: "Done", result });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Analysis failed";
+        console.error("[api/analyze] Pipeline failed:", ticker, err);
         send({ stage: "error", message: msg, error: msg });
       } finally {
         controller.close();

@@ -18,10 +18,35 @@ export async function GET(req: NextRequest) {
     const encoded = encodeURIComponent(q);
     const url = `https://api.polygon.io/v3/reference/tickers?search=${encoded}&active=true&market=stocks&limit=20&apiKey=${apiKey}`;
     const res = await fetch(url, { next: { revalidate: 0 } });
-    const data = await res.json();
+    const data = (await res.json()) as {
+      results?: { ticker: string; name: string; primary_exchange?: string }[];
+      error?: string;
+      message?: string;
+      status?: string;
+    };
 
     if (res.status === 403) {
-      return NextResponse.json({ error: "Invalid Polygon API key" }, { status: 403 });
+      return NextResponse.json(
+        { error: data.error || data.message || "Invalid Polygon API key" },
+        { status: 403 }
+      );
+    }
+
+    if (!res.ok) {
+      const msg =
+        typeof data.error === "string"
+          ? data.error
+          : typeof data.message === "string"
+            ? data.message
+            : `Polygon ticker search failed (HTTP ${res.status})`;
+      console.error("[api/search] Polygon error:", res.status, data);
+      return NextResponse.json({ error: msg }, { status: 502 });
+    }
+
+    if (data.status === "ERROR") {
+      const msg = typeof data.error === "string" ? data.error : "Polygon returned an error for this search.";
+      console.error("[api/search] Polygon status ERROR:", data);
+      return NextResponse.json({ error: msg }, { status: 502 });
     }
 
     const results: StockSearchResult[] = (data.results ?? []).map(
@@ -32,7 +57,9 @@ export async function GET(req: NextRequest) {
       })
     );
     return NextResponse.json({ results });
-  } catch {
-    return NextResponse.json({ error: "Search failed" }, { status: 500 });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Search failed";
+    console.error("[api/search]", e);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
