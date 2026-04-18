@@ -82,13 +82,13 @@ export default function Watchlist() {
                 <div>
                   <p className="text-[10px] text-slate-600 uppercase tracking-wider mb-0.5">Price</p>
                   <p className="text-base font-bold text-slate-200 tabular-nums">
-                    {item.lastPrice ? `$${item.lastPrice.toFixed(2)}` : "—"}
+                    {item.lastPrice != null ? `$${item.lastPrice.toFixed(2)}` : "—"}
                   </p>
                 </div>
                 <div className="text-right">
                   <p className="text-[10px] text-slate-600 uppercase tracking-wider mb-0.5">Score</p>
                   <p className={`text-base font-black tabular-nums ${scoreColor(item.lastQuantScore)}`}>
-                    {item.lastQuantScore ? item.lastQuantScore.toFixed(0) : "—"}
+                    {item.lastQuantScore != null ? item.lastQuantScore.toFixed(0) : "—"}
                   </p>
                 </div>
               </div>

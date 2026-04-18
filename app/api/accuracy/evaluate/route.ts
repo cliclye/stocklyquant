@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fetchPolygonBars } from "@/lib/analyzeStock";
+import { pickApiKey } from "@/lib/pickApiKey";
 import type { LocalAccuracyEvaluation } from "@/lib/localAccuracy";
 
 function addDays(dateStr: string, days: number): string {
@@ -21,7 +22,7 @@ interface EvaluateItem {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const polygonKey: string = process.env.POLYGON_API_KEY || body.polygonKey || "";
+  const polygonKey = pickApiKey(process.env.POLYGON_API_KEY, body.polygonKey);
   const items = body.items as EvaluateItem[] | undefined;
 
   if (!polygonKey) {

@@ -77,10 +77,24 @@ export function dateOffset(days: number): string {
 
 async function fmpGet<T>(path: string, fmpKey: string): Promise<T> {
   const res = await fetch(
-    `https://financialmodelingprep.com/api/v3${path}?apikey=${fmpKey}`,
+    `https://financialmodelingprep.com/api/v3${path}?apikey=${encodeURIComponent(fmpKey.trim())}`,
     { cache: "no-store" }
   );
-  if (res.status === 403) throw new Error("Invalid FMP API key");
+  if (res.status === 403) {
+    let detail = "";
+    try {
+      const raw = await res.text();
+      const j = JSON.parse(raw) as { "Error Message"?: string; message?: string };
+      detail = (j["Error Message"] ?? j.message ?? raw).trim();
+    } catch {
+      /* ignore */
+    }
+    throw new Error(
+      detail
+        ? `FMP denied access (HTTP 403): ${detail}`
+        : "FMP denied access (HTTP 403). Check your API key, plan limits, or remove a stale FMP_API_KEY from .env if you use keys from Settings."
+    );
+  }
   if (res.status === 429) throw new Error("FMP rate limited — please try again later");
   if (!res.ok) throw new Error(`FMP API error (HTTP ${res.status}) for ${path}`);
   return res.json();

@@ -20,7 +20,7 @@ export default function MarketDashboard() {
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  const hasKeys = envKeysSet || apiKeys.polygon;
+  const hasKeys = Boolean(envKeysSet || apiKeys.polygon);
 
   async function load() {
     if (!hasKeys) return;

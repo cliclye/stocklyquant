@@ -24,7 +24,7 @@ interface SearchInputProps {
   loadingSuggestions: boolean;
   searchError: string;
   setSearchError: React.Dispatch<React.SetStateAction<string>>;
-  hasKeys: boolean | string;
+  hasKeys: boolean;
   analyzing: boolean;
   analyze: (ticker: string) => void;
   setCurrentAnalysis: (a: QuantAnalysis | null) => void;
@@ -148,7 +148,7 @@ export default function StockSearch() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKeys, envKeysSet]);
 
-  const hasKeys = envKeysSet || (apiKeys.polygon && apiKeys.fmp);
+  const hasKeys = Boolean(envKeysSet || (apiKeys.polygon && apiKeys.fmp));
 
   useEffect(() => {
     if (!query.trim() || query.length < 1) {

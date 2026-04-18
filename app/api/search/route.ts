@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { StockSearchResult } from "@/lib/types";
+import { pickApiKey } from "@/lib/pickApiKey";
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams.get("q");
   const userKey = req.nextUrl.searchParams.get("key");
-  const apiKey = process.env.POLYGON_API_KEY || userKey;
+  const apiKey = pickApiKey(process.env.POLYGON_API_KEY, userKey);
 
   if (!q || !apiKey) {
     return NextResponse.json({ error: "Missing query or API key" }, { status: 400 });

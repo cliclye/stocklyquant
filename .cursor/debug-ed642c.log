@@ -1,0 +1,1 @@
+{"sessionId":"ed642c","timestamp":1776483655020,"hypothesisId":"H5","location":"app/api/search/route.ts:GET","message":"search polygon key resolution","data":{"queryKeyPresent":true,"envPolygonSet":true,"clientKeyUsedWhenPresent":true},"runId":"post-fix"}

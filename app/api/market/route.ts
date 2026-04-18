@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { PricePoint } from "@/lib/types";
+import { pickApiKey } from "@/lib/pickApiKey";
 
 const INDICES = ["SPY", "QQQ", "DIA", "IWM", "VXX"];
 
@@ -32,7 +33,7 @@ async function fetchLatestBar(
 
 export async function GET(req: NextRequest) {
   const userKey = req.nextUrl.searchParams.get("key");
-  const apiKey = process.env.POLYGON_API_KEY || userKey;
+  const apiKey = pickApiKey(process.env.POLYGON_API_KEY, userKey);
 
   if (!apiKey) {
     return NextResponse.json({ error: "API key required" }, { status: 400 });

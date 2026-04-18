@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { ProgressEvent } from "@/lib/types";
 import { analyzeStock } from "@/lib/analyzeStock";
+import { pickApiKey } from "@/lib/pickApiKey";
 
 const encoder = new TextEncoder();
 
@@ -14,9 +15,9 @@ const TICKER_RE = /^[A-Z]{1,6}(\.[A-Z]{1,2})?$/;
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const ticker: string = (body.ticker ?? "").toUpperCase().trim();
-  const polygonKey: string = process.env.POLYGON_API_KEY || body.polygonKey || "";
-  const fmpKey: string = process.env.FMP_API_KEY || body.fmpKey || "";
-  const claudeKey: string = process.env.ANTHROPIC_API_KEY || body.claudeKey || "";
+  const polygonKey = pickApiKey(process.env.POLYGON_API_KEY, body.polygonKey);
+  const fmpKey = pickApiKey(process.env.FMP_API_KEY, body.fmpKey);
+  const claudeKey = pickApiKey(process.env.ANTHROPIC_API_KEY, body.claudeKey);
 
   if (!ticker) return NextResponse.json({ error: "Ticker required" }, { status: 400 });
   if (!TICKER_RE.test(ticker)) return NextResponse.json({ error: "Invalid ticker format" }, { status: 400 });
